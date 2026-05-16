@@ -1,0 +1,6 @@
+<Solution>
+  <Project Path="MTRCS/MTRCS.csproj" />
+  <Project Path="MTRCSLib.Tests/MTRCSLib.Tests.csproj" />
+  <Project Path="MTRCSLib/MTRCSLib.csproj" />
+  <Project Path="MTRCSUI/MTRCSUI.csproj" />
+</Solution>
