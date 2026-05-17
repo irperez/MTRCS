@@ -64,10 +64,11 @@ internal sealed class MtrAnsiRenderer
     // ── per-hop caches ────────────────────────────────────────────────────────
 
     // Pre-encoded UTF-8 bytes for the HOST column of each hop.
-    // Rebuilt only when address or hostname changes.
+    // Rebuilt only when address, hostname, or available column width changes.
     private readonly byte[]?[] _hopHostBytes;
     private readonly string?[] _hopLastAddress;
     private readonly string?[] _hopLastHostName;
+    private readonly int[]     _hopLastHostWidth;
 
     // Pre-computed TTL prefix strings " 1." … "NN.".
     private readonly string[] _ttlPrefixes;
@@ -82,11 +83,12 @@ internal sealed class MtrAnsiRenderer
     {
         int maxHops = options.MaxHops;
 
-        _snapBuffer      = new HopStats[maxHops];
-        _hopHostBytes    = new byte[maxHops][];
-        _hopLastAddress  = new string?[maxHops];
-        _hopLastHostName = new string?[maxHops];
-        _ttlPrefixes     = new string[maxHops];
+        _snapBuffer       = new HopStats[maxHops];
+        _hopHostBytes     = new byte[maxHops][];
+        _hopLastAddress   = new string?[maxHops];
+        _hopLastHostName  = new string?[maxHops];
+        _hopLastHostWidth = new int[maxHops];
+        _ttlPrefixes      = new string[maxHops];
 
         for (int i = 0; i < maxHops; i++)
         {
@@ -180,8 +182,8 @@ internal sealed class MtrAnsiRenderer
         for (int i = 0; i < count; i++)
         {
             ref readonly HopStats h = ref _snapBuffer[i];
-            WriteHopLine(i, in h, numBuf);
-            WriteEcmpLines(in h);
+            WriteHopLine(i, in h, numBuf, out int hostWidth);
+            WriteEcmpLines(in h, hostWidth);
         }
 
         // Clear any rows left over from a previous frame that had more hops.
@@ -281,17 +283,33 @@ internal sealed class MtrAnsiRenderer
         _writer.Reset();
     }
 
-    private void WriteHopLine(int hopIndex, in HopStats h, Span<char> numBuf)
+    // Returns the 1-based terminal column where the stats section starts, given the current console width.
+    private int ComputeStatsStartColumn(int consoleWidth)
+    {
+        int statsWidth = W_Stats + (_showAsn ? ColSepW + W_Asn : 0);
+        int col = consoleWidth - statsWidth;
+        return col > W_Host ? col : 0;  // 0 = terminal too narrow, use fallback
+    }
+
+    private void WriteHopLine(int hopIndex, in HopStats h, Span<char> numBuf, out int hostWidth)
     {
         bool hasRtt = h.Sent > h.Lost;
 
+        // Compute how wide the host column actually is this frame.
+        int consoleWidth = Console.WindowWidth;
+        int statsCol     = ComputeStatsStartColumn(consoleWidth);   // 0 = too narrow
+        hostWidth        = statsCol > 0 ? statsCol - 1 : W_Host;    // -1: leave 1-col gap before cursor jump
+
         // ── HOST column (pre-encoded, cached) ─────────────────────────────────
-        byte[] hostBytes = GetOrBuildHostBytes(hopIndex, in h);
+        byte[] hostBytes = GetOrBuildHostBytes(hopIndex, in h, hostWidth);
         _writer.WriteRaw(hostBytes);
 
         // Erase remaining host area, then jump so stats right-align to the terminal edge.
         _writer.EraseEol();
-        MoveToStatsColumn();
+        if (statsCol > 0)
+            _writer.MoveCursorToColumn(statsCol);
+        else
+            MoveToStatsColumn();
 
         // ── Loss% ─────────────────────────────────────────────────────────────
         WriteColoredRttColumn(h.LossPercent, numBuf, isLoss: true);
@@ -326,7 +344,7 @@ internal sealed class MtrAnsiRenderer
     }
 
     // Writes additional indented lines for each ECMP alternate address at this hop.
-    private void WriteEcmpLines(in HopStats h)
+    private void WriteEcmpLines(in HopStats h, int hostWidth)
     {
         int altCount = h.AltAddressCount;
         if (altCount == 0) return;
@@ -342,18 +360,36 @@ internal sealed class MtrAnsiRenderer
             _writer.Write(indent);
             _writer.Reset();
 
+            int available   = hostWidth - indent.Length;
+            int ipSuffixLen = altIp.Length + 3; // " (" + ip + ")"
+
             if (altHn is { Length: > 0 } && !string.Equals(altHn, altIp, StringComparison.Ordinal))
             {
-                int overhead = indent.Length + 2 + altIp.Length + 1;
-                int maxHnLen = W_Host - overhead;
-                string label = maxHnLen > 0 && altHn.Length > maxHnLen
-                    ? $"{altHn[..maxHnLen]} ({altIp})"
-                    : $"{altHn} ({altIp})";
-                _writer.WriteFixed(label.AsSpan(), W_Host - indent.Length);
+                if (available >= altHn.Length + ipSuffixLen)
+                {
+                    // Phase 3: full "hn (ip)"
+                    string label = $"{altHn} ({altIp})";
+                    _writer.WriteFixed(label.AsSpan(), available);
+                }
+                else if (available >= 2 + ipSuffixLen)
+                {
+                    // Phase 2: truncated hostname + "…" + " (ip)"
+                    int maxHnLen = available - 1 - ipSuffixLen;
+                    string label = $"{altHn[..maxHnLen]}\u2026 ({altIp})";
+                    _writer.WriteFixed(label.AsSpan(), available);
+                }
+                else
+                {
+                    // Phase 1: hostname only, truncated if needed
+                    string hn = altHn.Length > available
+                        ? $"{altHn[..Math.Max(0, available - 1)]}\u2026"
+                        : altHn;
+                    _writer.WriteFixed(hn.AsSpan(), available);
+                }
             }
             else
             {
-                _writer.WriteFixed(altIp.AsSpan(), W_Host - indent.Length);
+                _writer.WriteFixed(altIp.AsSpan(), available);
             }
 
             _writer.EraseEol();
@@ -422,72 +458,92 @@ internal sealed class MtrAnsiRenderer
 
     // ── per-hop host label cache ──────────────────────────────────────────────
 
-    private byte[] GetOrBuildHostBytes(int hopIndex, in HopStats h)
+    private byte[] GetOrBuildHostBytes(int hopIndex, in HopStats h, int hostWidth)
     {
         string? currentAddress  = h.Address?.ToString();
         string? currentHostName = h.HostName;
 
         if (_hopHostBytes[hopIndex] is { } cached &&
             currentAddress  == _hopLastAddress[hopIndex] &&
-            currentHostName == _hopLastHostName[hopIndex])
+            currentHostName == _hopLastHostName[hopIndex] &&
+            hostWidth        == _hopLastHostWidth[hopIndex])
         {
             return cached;
         }
 
-        byte[] encoded = BuildAndEncodeHostLabel(hopIndex, currentAddress, currentHostName);
+        byte[] encoded = BuildAndEncodeHostLabel(hopIndex, currentAddress, currentHostName, hostWidth);
 
         _hopHostBytes[hopIndex]    = encoded;
         _hopLastAddress[hopIndex]  = currentAddress;
         _hopLastHostName[hopIndex] = currentHostName;
+        _hopLastHostWidth[hopIndex] = hostWidth;
 
         return encoded;
     }
 
-    private byte[] BuildAndEncodeHostLabel(int hopIndex, string? ip, string? hostName)
+    private byte[] BuildAndEncodeHostLabel(int hopIndex, string? ip, string? hostName, int hostWidth)
     {
         string prefix = _ttlPrefixes[hopIndex];
 
         // Build the visible text portion first into a char buffer, then encode to UTF-8.
-        // This is called only when hop identity changes — not on every frame.
+        // This is called only when hop identity or available width changes — not on every frame.
         using var sb = new ValueStringBuilder(stackalloc char[64]);
 
         if (ip is null)
         {
-            // No address yet — write "  1. ???" in grey.
-            // We encode the ANSI grey sequence around the label.
             sb.Append(prefix);
             sb.Append(' ');
             sb.Append("???");
-            byte[] greyBytes = EncodeWithColor(sb.AsSpan(), ColorKind.Grey, W_Host);
-            return greyBytes;
+            return EncodeWithColor(sb.AsSpan(), ColorKind.Grey, hostWidth);
         }
 
         if (hostName is { Length: > 0 } hn &&
             !string.Equals(hn, ip, StringComparison.Ordinal))
         {
-            // "{prefix} {hn} ({ip})" — truncate hostname to fit.
-            int overhead = prefix.Length + 1 + 2 + ip.Length + 1; // prefix + " " + " (" + ip + ")"
-            int maxHnLen = W_Host - overhead;
+            // available = chars left in hostWidth after "prefix " (TTL prefix + one space).
+            int available   = hostWidth - prefix.Length - 1;
+            int ipSuffixLen = ip.Length + 3; // " (" + ip + ")" = 3 + ip.Length
 
-            if (maxHnLen > 0)
+            if (available >= hn.Length + ipSuffixLen)
             {
-                if (hn.Length > maxHnLen)
-                    hn = string.Concat(hn.AsSpan(0, maxHnLen - 1), "\u2026"); // "…"
-
+                // Phase 3: enough room for full "hn (ip)" — no ellipsis.
                 sb.Append(prefix);
                 sb.Append(' ');
                 sb.Append(hn);
-
-                // Encode "prefix hn" in default color, then " (ip)" in grey.
-                return EncodeLabelWithGreyIp(sb.AsSpan(), ip, W_Host);
+                return EncodeLabelWithGreyIp(sb.AsSpan(), ip, hostWidth);
             }
+
+            if (available >= 2 + ipSuffixLen)
+            {
+                // Phase 2: show as many hostname chars as fit, then "…", then " (ip)".
+                int maxHnLen = available - 1 - ipSuffixLen; // -1 for "…"
+                sb.Append(prefix);
+                sb.Append(' ');
+                sb.Append(hn.AsSpan(0, maxHnLen));
+                sb.Append('\u2026'); // "…"
+                return EncodeLabelWithGreyIp(sb.AsSpan(), ip, hostWidth);
+            }
+
+            // Phase 1: not enough space for the IP at all — show hostname only, truncated if needed.
+            sb.Append(prefix);
+            sb.Append(' ');
+            if (hn.Length > available)
+            {
+                sb.Append(hn.AsSpan(0, Math.Max(0, available - 1)));
+                sb.Append('\u2026'); // "…"
+            }
+            else
+            {
+                sb.Append(hn);
+            }
+            return EncodePadded(sb.AsSpan(), hostWidth);
         }
 
         // Fallback: just "prefix ip".
         sb.Append(prefix);
         sb.Append(' ');
         sb.Append(ip);
-        return EncodePadded(sb.AsSpan(), W_Host);
+        return EncodePadded(sb.AsSpan(), hostWidth);
     }
 
     // ── static encoding helpers ───────────────────────────────────────────────
