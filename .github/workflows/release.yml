@@ -1,0 +1,248 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+      - "v[0-9]+.[0-9]+.[0-9]+-*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release (e.g. 1.2.3 — without the 'v' prefix)"
+        required: true
+        default: "1.0.0"
+
+env:
+  DOTNET_NOLOGO: true
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+  PROJECT_PATH: MTRCSLib/MTRCS/MTRCS.csproj
+
+jobs:
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Build each platform artifact
+  # ─────────────────────────────────────────────────────────────────────────────
+  build:
+    name: Build · ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # ── Windows x64 (Native AOT) ──────────────────────────────────────────
+          - name: Windows x64
+            os: windows-latest
+            rid: win-x64
+            archive_ext: zip
+            aot: true
+
+          # ── macOS Apple Silicon (Native AOT) ─────────────────────────────────
+          - name: macOS Apple Silicon
+            os: macos-14
+            rid: osx-arm64
+            archive_ext: tar.gz
+            aot: true
+
+          # ── Linux x64 (Native AOT) ───────────────────────────────────────────
+          - name: Linux x64
+            os: ubuntu-latest
+            rid: linux-x64
+            archive_ext: tar.gz
+            aot: true
+
+          # ── Linux ARM64 (Native AOT — GitHub ARM64 runner) ───────────────────
+          - name: Linux ARM64
+            os: ubuntu-24.04-arm
+            rid: linux-arm64
+            archive_ext: tar.gz
+            aot: true
+
+          # ── Raspberry Pi / Linux ARMv7 (self-contained, cross-compiled) ──────
+          - name: Raspberry Pi (ARMv7)
+            os: ubuntu-latest
+            rid: linux-arm
+            archive_ext: tar.gz
+            aot: false
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      # Determine release version from tag or manual input
+      - name: Resolve version
+        id: version
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+          else
+            VERSION="${GITHUB_REF_NAME#v}"   # strip leading 'v'
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=v${VERSION}"    >> "$GITHUB_OUTPUT"
+
+      # ── Platform-specific prerequisites ───────────────────────────────────────
+
+      - name: Install native AOT prerequisites (Linux x64)
+        if: runner.os == 'Linux' && matrix.aot == true && matrix.rid == 'linux-x64'
+        run: sudo apt-get update -y && sudo apt-get install -y clang zlib1g-dev
+
+      - name: Install native AOT prerequisites (Linux ARM64)
+        if: runner.os == 'Linux' && matrix.aot == true && matrix.rid == 'linux-arm64'
+        run: sudo apt-get update -y && sudo apt-get install -y clang zlib1g-dev
+
+      # ── Publish ───────────────────────────────────────────────────────────────
+
+      - name: Publish (Native AOT)
+        if: matrix.aot == true
+        run: >
+          dotnet publish ${{ env.PROJECT_PATH }}
+          --configuration Release
+          --runtime ${{ matrix.rid }}
+          --self-contained true
+          -p:PublishAot=true
+          -p:StripSymbols=true
+          -p:Version=${{ steps.version.outputs.version }}
+          -p:InformationalVersion=${{ steps.version.outputs.version }}+${{ github.run_number }}
+          --output publish/${{ matrix.rid }}
+
+      - name: Publish (Self-contained, trimmed — cross-compile)
+        if: matrix.aot == false
+        run: >
+          dotnet publish ${{ env.PROJECT_PATH }}
+          --configuration Release
+          --runtime ${{ matrix.rid }}
+          --self-contained true
+          -p:PublishAot=false
+          -p:PublishSingleFile=true
+          -p:PublishTrimmed=true
+          -p:Version=${{ steps.version.outputs.version }}
+          -p:InformationalVersion=${{ steps.version.outputs.version }}+${{ github.run_number }}
+          --output publish/${{ matrix.rid }}
+
+      # ── Archive ───────────────────────────────────────────────────────────────
+
+      - name: Archive (zip — Windows)
+        if: matrix.archive_ext == 'zip'
+        shell: pwsh
+        run: |
+          $src  = "publish/${{ matrix.rid }}"
+          $dest = "mtrcs-${{ steps.version.outputs.tag }}-${{ matrix.rid }}.zip"
+          Compress-Archive -Path "$src\*" -DestinationPath $dest
+          echo "ARTIFACT=$dest" | Out-File -FilePath $Env:GITHUB_ENV -Append
+
+      - name: Archive (tar.gz — Unix)
+        if: matrix.archive_ext == 'tar.gz'
+        shell: bash
+        run: |
+          DEST="mtrcs-${{ steps.version.outputs.tag }}-${{ matrix.rid }}.tar.gz"
+          tar -czf "$DEST" -C "publish/${{ matrix.rid }}" .
+          echo "ARTIFACT=$DEST" >> "$GITHUB_ENV"
+
+      # ── Upload artifact for the release job ───────────────────────────────────
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mtrcs-${{ matrix.rid }}
+          path: ${{ env.ARTIFACT }}
+          retention-days: 1
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Create GitHub Release and attach all artifacts
+  # ─────────────────────────────────────────────────────────────────────────────
+  release:
+    name: Create GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: version
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+          else
+            VERSION="${GITHUB_REF_NAME#v}"
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=v${VERSION}"    >> "$GITHUB_OUTPUT"
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4.1.8
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -lh dist/
+
+      - name: Generate release notes
+        id: notes
+        run: |
+          cat << 'EOF' > release-notes.md
+          ## 📦 MTRCS ${{ steps.version.outputs.tag }}
+
+          Cross-platform MTR rewrite in C# — because your network deserves modern tooling.
+
+          ### 🚀 Quick Install
+
+          Download the binary for your platform below and make it executable:
+
+          ```bash
+          # Linux / macOS
+          chmod +x mtrcs
+          sudo mv mtrcs /usr/local/bin/
+          mtrcs --version
+
+          # Windows — run from any PowerShell or cmd prompt
+          .\mtrcs.exe --version
+          ```
+
+          ### 📋 Platform Downloads
+
+          | Platform | File | Notes |
+          |----------|------|-------|
+          | Windows x64 | `mtrcs-${{ steps.version.outputs.tag }}-win-x64.zip` | Native AOT |
+          | macOS Apple Silicon | `mtrcs-${{ steps.version.outputs.tag }}-osx-arm64.tar.gz` | Native AOT |
+          | Linux x64 | `mtrcs-${{ steps.version.outputs.tag }}-linux-x64.tar.gz` | Native AOT |
+          | Linux ARM64 | `mtrcs-${{ steps.version.outputs.tag }}-linux-arm64.tar.gz` | Native AOT |
+          | Raspberry Pi (ARMv7) | `mtrcs-${{ steps.version.outputs.tag }}-linux-arm.tar.gz` | Self-contained |
+
+          ### ⚙️ Requirements
+
+          - **Linux**: No runtime needed (self-contained binary)
+          - **macOS**: No runtime needed — may require `xattr -d com.apple.quarantine ./mtrcs` on first run
+          - **Windows**: May require running as Administrator for raw ICMP sockets
+          - **Raspberry Pi**: May need `sudo` for ICMP probes
+
+          ### 📝 Changelog
+
+          See [CHANGELOG](https://github.com/irperez/MTRCS/blob/main/CHANGELOG.md) for full details.
+
+          ---
+          > Built from commit `${{ github.sha }}` · Build #${{ github.run_number }}
+          EOF
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: "MTRCS ${{ steps.version.outputs.tag }}"
+          body_path: release-notes.md
+          draft: false
+          prerelease: ${{ contains(steps.version.outputs.version, '-') }}
+          files: dist/*
+          generate_release_notes: false
+          make_latest: true
