@@ -80,6 +80,7 @@ internal sealed class MtrRenderer
         {
             ref readonly HopStats h = ref _snapBuffer[i];
             WriteHopLine(writer, i, in h, numBuf);
+            WriteEcmpLines(writer, in h);
         }
 
         writer.Flush();
@@ -133,6 +134,43 @@ internal sealed class MtrRenderer
         }
 
         w.NewLine();
+    }
+
+    // Writes additional indented lines for each ECMP alternate address at this hop.
+    // Matches MTR behaviour: subsequent lines show just the hostname/IP, no stats.
+    private static void WriteEcmpLines(AnsiWriter w, in HopStats h)
+    {
+        int altCount = h.AltAddressCount;
+        if (altCount == 0) return;
+
+        // Indent to match the host column ("    " = 4 chars for TTL prefix + space).
+        const string indent = "    ";
+
+        for (int a = 0; a < altCount; a++)
+        {
+            string altIp = h.GetAltAddress(a).ToString();
+            string? altHn = h.GetAltHostName(a);
+
+            w.Grey();
+            w.Write(indent);
+            w.Reset();
+
+            if (altHn is { Length: > 0 } && !string.Equals(altHn, altIp, StringComparison.Ordinal))
+            {
+                int overhead  = indent.Length + 2 + altIp.Length + 1; // indent + " (" + ip + ")"
+                int maxHnLen  = W_Host - overhead;
+                string label  = maxHnLen > 0 && altHn.Length > maxHnLen
+                    ? $"{altHn[..maxHnLen]} ({altIp})"
+                    : $"{altHn} ({altIp})";
+                w.WriteFixed(label.AsSpan(), W_Host - indent.Length);
+            }
+            else
+            {
+                w.WriteFixed(altIp.AsSpan(), W_Host - indent.Length);
+            }
+
+            w.NewLine();
+        }
     }
 
     private void WriteHostColumn(AnsiWriter w, int hopIndex, in HopStats h)

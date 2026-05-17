@@ -42,8 +42,13 @@ internal sealed class MtrAnsiRenderer
 
     // Header row bytes, encoded once at construction.
     private readonly byte[] _titleBytes;
+    private readonly byte[] _keysBytes;
+    private readonly byte[] _subHeaderBytes;
     private readonly byte[] _headerBytes;
     private readonly bool _showAsn;
+
+    // ── start timestamp ───────────────────────────────────────────────────────
+    private readonly DateTime _startedAt;
 
     // ── per-hop caches ────────────────────────────────────────────────────────
 
@@ -83,9 +88,12 @@ internal sealed class MtrAnsiRenderer
         string titleHost = options.Host.Equals(targetIp, StringComparison.Ordinal)
             ? options.Host
             : $"{options.Host} ({targetIp})";
-        _titleBytes  = EncodeTitleLine(titleHost);
-        _headerBytes = EncodeHeaderLine(options.EnableAsn);
-        _showAsn     = options.EnableAsn;
+        _titleBytes     = EncodeTitleLine(titleHost);
+        _keysBytes      = EncodeKeysLine();
+        _subHeaderBytes = EncodeSubHeaderLine(options.EnableAsn);
+        _headerBytes    = EncodeHeaderLine(options.EnableAsn);
+        _showAsn        = options.EnableAsn;
+        _startedAt      = DateTime.Now;
 
         // 16 KB frame buffer — ample for 30 hops × ~150 bytes + title/header overhead.
         _writer = new AnsiWriter(16 * 1024);
@@ -119,12 +127,23 @@ internal sealed class MtrAnsiRenderer
 
         _writer.Home();
 
-        // ── title ─────────────────────────────────────────────────────────────
+        // ── title + start timestamp ────────────────────────────────────────────
         _writer.WriteRaw(_titleBytes);
+        WriteTitleTimestamp();
         _writer.EraseEol();
         _writer.NewLine();
 
-        // ── header ────────────────────────────────────────────────────────────
+        // ── keys bar ──────────────────────────────────────────────────────────
+        _writer.WriteRaw(_keysBytes);
+        _writer.EraseEol();
+        _writer.NewLine();
+
+        // ── Packets / Pings sub-header ────────────────────────────────────────
+        _writer.WriteRaw(_subHeaderBytes);
+        _writer.EraseEol();
+        _writer.NewLine();
+
+        // ── column header ─────────────────────────────────────────────────────
         _writer.WriteRaw(_headerBytes);
         _writer.EraseEol();
         _writer.NewLine();
@@ -147,11 +166,32 @@ internal sealed class MtrAnsiRenderer
         {
             ref readonly HopStats h = ref _snapBuffer[i];
             WriteHopLine(i, in h, numBuf);
+            WriteEcmpLines(in h);
         }
 
         // Clear any rows left over from a previous frame that had more hops.
         _writer.EraseToEnd();
         _writer.Flush();
+    }
+
+    // Writes the start timestamp right-justified on the current line.
+    // Format matches MTR: "ddd MMM  d HH:mm:ss yyyy"  (single-digit day gets extra space).
+    private void WriteTitleTimestamp()
+    {
+        // Format: "Wed Dec  9 03:07:34 2020"
+        Span<char> buf = stackalloc char[32];
+        bool ok = _startedAt.TryFormat(buf, out int written, "ddd MMM  d HH:mm:ss yyyy");
+        ReadOnlySpan<char> stamp = ok ? buf[..written] : _startedAt.ToString("ddd MMM  d HH:mm:ss yyyy").AsSpan();
+
+        // Use a cursor-position move to right-align: ESC[{col}G where col = consoleWidth - stamp.Length + 1.
+        int consoleWidth = Console.WindowWidth;
+        if (consoleWidth <= stamp.Length) return;   // terminal too narrow — skip
+
+        int col = consoleWidth - stamp.Length + 1;  // 1-based column
+        _writer.Grey();
+        _writer.MoveCursorToColumn(col);
+        _writer.WriteFixed(stamp, stamp.Length, rightAlign: false);
+        _writer.Reset();
     }
 
     // ── private: frame composition ────────────────────────────────────────────
@@ -195,6 +235,42 @@ internal sealed class MtrAnsiRenderer
 
         _writer.EraseEol();
         _writer.NewLine();
+    }
+
+    // Writes additional indented lines for each ECMP alternate address at this hop.
+    private void WriteEcmpLines(in HopStats h)
+    {
+        int altCount = h.AltAddressCount;
+        if (altCount == 0) return;
+
+        const string indent = "    "; // 4 spaces = TTL prefix width (" N." + space)
+
+        for (int a = 0; a < altCount; a++)
+        {
+            string altIp = h.GetAltAddress(a).ToString();
+            string? altHn = h.GetAltHostName(a);
+
+            _writer.Grey();
+            _writer.Write(indent);
+            _writer.Reset();
+
+            if (altHn is { Length: > 0 } && !string.Equals(altHn, altIp, StringComparison.Ordinal))
+            {
+                int overhead = indent.Length + 2 + altIp.Length + 1;
+                int maxHnLen = W_Host - overhead;
+                string label = maxHnLen > 0 && altHn.Length > maxHnLen
+                    ? $"{altHn[..maxHnLen]} ({altIp})"
+                    : $"{altHn} ({altIp})";
+                _writer.WriteFixed(label.AsSpan(), W_Host - indent.Length);
+            }
+            else
+            {
+                _writer.WriteFixed(altIp.AsSpan(), W_Host - indent.Length);
+            }
+
+            _writer.EraseEol();
+            _writer.NewLine();
+        }
     }
 
     private void WriteRttColumn(double ms, Span<char> buf)
@@ -392,13 +468,9 @@ internal sealed class MtrAnsiRenderer
 
     private static byte[] EncodeTitleLine(string titleHost)
     {
-        // "mtrcs  {titleHost}  Keys: q=quit"
-        // Bold "mtrcs", cyan host, grey keys hint.
-        using var sb = new ValueStringBuilder(stackalloc char[128]);
-        sb.Append("mtrcs");
-
-        // We'll compose the byte sequence manually to embed color codes.
-        int maxBytes = 128 + Encoding.UTF8.GetMaxByteCount(titleHost.Length);
+        // "mtrcs  {titleHost}"
+        // Bold "mtrcs", cyan host.
+        int maxBytes = 64 + Encoding.UTF8.GetMaxByteCount(titleHost.Length);
         byte[] buf = new byte[maxBytes];
         int pos = 0;
 
@@ -409,10 +481,60 @@ internal sealed class MtrAnsiRenderer
         "\x1B[96m"u8.CopyTo(buf.AsSpan(pos)); pos += 5;         // cyan
         pos += Encoding.UTF8.GetBytes(titleHost, buf.AsSpan(pos));
         "\x1B[0m"u8.CopyTo(buf.AsSpan(pos)); pos += 4;          // reset
+
+        return buf[..pos];
+    }
+
+    private static byte[] EncodeKeysLine()
+    {
+        // "Keys:  d=Display mode  r=Restart statistics  q=quit"
+        // Bold key letters, normal text.
+        byte[] buf = new byte[128];
+        int pos = 0;
+
+        "\x1B[1m"u8.CopyTo(buf.AsSpan(pos)); pos += 4;           // bold
+        "Keys:"u8.CopyTo(buf.AsSpan(pos)); pos += 5;
+        "\x1B[0m"u8.CopyTo(buf.AsSpan(pos)); pos += 4;           // reset
         "  "u8.CopyTo(buf.AsSpan(pos)); pos += 2;
-        "\x1B[90m"u8.CopyTo(buf.AsSpan(pos)); pos += 5;         // grey
-        "Keys: q=quit"u8.CopyTo(buf.AsSpan(pos)); pos += 12;
-        "\x1B[0m"u8.CopyTo(buf.AsSpan(pos)); pos += 4;          // reset
+        "\x1B[1m"u8.CopyTo(buf.AsSpan(pos)); pos += 4; buf[pos++] = (byte)'r'; "\x1B[0m"u8.CopyTo(buf.AsSpan(pos)); pos += 4;
+        "=Restart statistics"u8.CopyTo(buf.AsSpan(pos)); pos += 19;
+        "  "u8.CopyTo(buf.AsSpan(pos)); pos += 2;
+        "\x1B[1m"u8.CopyTo(buf.AsSpan(pos)); pos += 4; buf[pos++] = (byte)'q'; "\x1B[0m"u8.CopyTo(buf.AsSpan(pos)); pos += 4;
+        "=quit"u8.CopyTo(buf.AsSpan(pos)); pos += 5;
+
+        return buf[..pos];
+    }
+
+    private static byte[] EncodeSubHeaderLine(bool showAsn)
+    {
+        // "                                              Packets           Pings"
+        // "Packets" centred over Loss%+Snt, "Pings" centred over Last+Avg+Best+Wrst+StDev+Jitter.
+        // W_Host(40) + ColSep(2) then columns.
+        // Packets section spans Loss%(7)+ColSep(2)+Snt(5) = 14 chars visually, centre label at position.
+        // Pings section spans Last+Avg+Best+Wrst+StDev+Jitter = 6*(7+2) = 54 chars.
+        byte[] buf = new byte[256];
+        int pos = 0;
+
+        "\x1B[1m"u8.CopyTo(buf.AsSpan(pos)); pos += 4;           // bold
+
+        // Blank space for HOST column + ColSep + right-align Loss% = W_Host + 2 + (W_Loss - "Loss%".len padding).
+        // We want "Packets" to appear above Loss%..Snt.  The Loss% column starts at offset W_Host+2=42.
+        // Loss%(7) + Sep(2) + Snt(5) = 14 chars wide.  Centre "Packets"(7) => 3 leading spaces + 4 trailing.
+        // Indent = W_Host + 2 + 3 = 45 spaces total.
+        const int PacketsIndent = W_Host + 2 + 3;           // 45
+        buf.AsSpan(pos, PacketsIndent).Fill((byte)' '); pos += PacketsIndent;
+        "Packets"u8.CopyTo(buf.AsSpan(pos)); pos += 7;
+
+        // Gap between Packets label and Pings label.
+        // After Snt: 4 trailing spaces of Packets label + ColSep(2) = positions already accounted for.
+        // Snt trailing = 14-3-7=4 chars to the right. Then ColSep(2) before Last(7) column.
+        // We have 4 trailing + 2 ColSep + floor((6*9-5)/2)=floor(49/2)=26 indent for "Pings".
+        // = 4 + 2 + 26 = 32 spaces.
+        const int PingsIndent = 4 + 2 + 26;                 // 32
+        buf.AsSpan(pos, PingsIndent).Fill((byte)' '); pos += PingsIndent;
+        "Pings"u8.CopyTo(buf.AsSpan(pos)); pos += 5;
+
+        "\x1B[0m"u8.CopyTo(buf.AsSpan(pos)); pos += 4;           // reset
 
         return buf[..pos];
     }

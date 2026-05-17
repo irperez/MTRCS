@@ -144,16 +144,30 @@ internal sealed class MtrCommand
             {
                 renderer.RenderFrame(session);
 
-                try
+                // Poll for key presses in small slices so the UI stays responsive.
+                long deadline = Environment.TickCount64 + 16;
+                while (Environment.TickCount64 < deadline && !ct.IsCancellationRequested)
                 {
-                    // Refresh at ~10 Hz so the UI stays snappy without burning CPU.
-                    await Task.Delay(100, ct).ConfigureAwait(false);
-                }
-                catch (OperationCanceledException)
-                {
-                    break;
+                    if (Console.KeyAvailable)
+                    {
+                        ConsoleKeyInfo key = Console.ReadKey(intercept: true);
+                        if (key.KeyChar is 'q' or 'Q')
+                        {
+                            goto done;
+                        }
+                        else if (key.KeyChar is 'r' or 'R')
+                        {
+                            session.ResetStats();
+                        }
+                    }
+                    else
+                    {
+                        try { await Task.Delay(10, ct).ConfigureAwait(false); }
+                        catch (OperationCanceledException) { goto done; }
+                    }
                 }
             }
+            done:;
 
             // Final render after cancellation.
             renderer.RenderFrame(session);

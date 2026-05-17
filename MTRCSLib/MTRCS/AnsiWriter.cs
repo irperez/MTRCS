@@ -50,6 +50,21 @@ internal sealed class AnsiWriter : IDisposable
     /// <summary>Moves the cursor to the top-left of the terminal (row 1, col 1).</summary>
     internal void Home()       => WriteRaw(CursorHome);
 
+    /// <summary>Moves the cursor to the given 1-based column on the current row. ESC[{col}G</summary>
+    internal void MoveCursorToColumn(int col)
+    {
+        // ESC [ <col> G  — CHA (Cursor Horizontal Absolute)
+        Span<char> numBuf = stackalloc char[8];
+        col.TryFormat(numBuf, out int written);
+
+        EnsureCapacity(4 + written);
+        _buffer[_pos++] = Esc;
+        _buffer[_pos++] = (byte)'[';
+        for (int i = 0; i < written; i++)
+            _buffer[_pos++] = (byte)numBuf[i];
+        _buffer[_pos++] = (byte)'G';
+    }
+
     /// <summary>Hides the cursor to prevent flicker during frame writes.</summary>
     internal void HideCaret()  => WriteRaw(HideCursor);
 

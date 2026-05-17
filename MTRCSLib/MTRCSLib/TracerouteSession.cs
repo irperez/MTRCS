@@ -29,6 +29,7 @@ public sealed class TracerouteSession : ITracerouteSession
     private readonly object _statsLock = new();
 
     private int _activeHopCount;
+    private int _destinationTtl;  // TTL at which destination first replied (0 = not yet seen)
     private ushort _sequence;
     private Task? _probeLoop;
     private CancellationTokenSource? _cts;
@@ -124,6 +125,18 @@ public sealed class TracerouteSession : ITracerouteSession
         return true;
     }
 
+    /// <inheritdoc/>
+    public void ResetStats()
+    {
+        lock (_statsLock)
+        {
+            for (int i = 0; i < _hops.Length; i++)
+                _hops[i].Reset();
+            Volatile.Write(ref _activeHopCount, 0);
+            Volatile.Write(ref _destinationTtl, 0);
+        }
+    }
+
     // ── probe loop ────────────────────────────────────────────────────────────
 
     private async Task RunProbeLoopAsync(CancellationToken ct)
@@ -153,13 +166,18 @@ public sealed class TracerouteSession : ITracerouteSession
     private async Task RunOneCycleAsync(CancellationToken ct)
     {
         using IPinger pinger = _pingerFactory.Create();
-        int hopCount = Options.MaxHops;
 
         // Probe TTLs 1..MaxHops sequentially with a single pinger per cycle, stopping
         // as soon as the destination replies (Success).  This avoids sending probes
         // beyond the known destination and matches traditional MTR behaviour.
         // Show the last TTL that received any response (TtlExpired) when destination
         // is not yet reached, or 1 row minimum so the UI is never blank.
+        // Cap probing at the known destination TTL once discovered.  Without this, a
+        // timeout at the destination hop causes the loop to probe one TTL further,
+        // creating a spurious extra row at that TTL.
+        int destTtl = Volatile.Read(ref _destinationTtl);
+        int hopCount = destTtl > 0 ? destTtl : Options.MaxHops;
+
         int newActiveHops = 1;
         for (int ttl = 1; ttl <= hopCount; ttl++)
         {
@@ -169,13 +187,21 @@ public sealed class TracerouteSession : ITracerouteSession
             if (result.Status == PingStatus.Success)
             {
                 newActiveHops = ttl;
+                if (Volatile.Read(ref _destinationTtl) == 0)
+                    Volatile.Write(ref _destinationTtl, ttl);
                 break;
             }
             if (result.Status == PingStatus.TtlExpired)
                 newActiveHops = ttl; // keep extending until no more responses
         }
 
-        Volatile.Write(ref _activeHopCount, newActiveHops);
+        // Never let the active hop count shrink between cycles — ECMP probes may
+        // reach the destination via a shorter path on some cycles, which would
+        // cause rows to flicker in and out.  Use Math.Max so the count is monotone
+        // until an explicit ResetStats() call.
+        int prev = ActiveHopCount;
+        if (newActiveHops > prev)
+            Volatile.Write(ref _activeHopCount, newActiveHops);
     }
 
     private async Task<ProbeResult> ProbeHopAsync(IPinger pinger, int ttl, ushort seq, CancellationToken ct)
@@ -196,13 +222,32 @@ public sealed class TracerouteSession : ITracerouteSession
 
             if (result.Status is PingStatus.Success or PingStatus.TtlExpired)
             {
-                hop.RecordSuccess(result.Address!, result.RoundTripMs);
+                // ECMP: only intermediate hops (TtlExpired) can have multiple routers at the
+                // same TTL.  A Success reply means we reached the destination — never treat
+                // that address as an alternate for an intermediate hop.
+                bool isAlt = result.Status == PingStatus.TtlExpired
+                          && hop.Address is not null
+                          && !hop.Address.Equals(result.Address!);
 
-                if (!hop.DnsResolved)
-                    ScheduleDnsResolution(hopIndex, result.Address!, ct);
+                if (isAlt)
+                {
+                    if (hop.TryRegisterAltAddress(result.Address!))
+                    {
+                        int altIndex = hop.AltAddressCount - 1;
+                        hop.MarkAltDnsScheduled(altIndex); // guard against double-scheduling
+                        ScheduleAltDnsResolution(hopIndex, altIndex, result.Address!, ct);
+                    }
+                }
+                else
+                {
+                    hop.RecordSuccess(result.Address!, result.RoundTripMs);
 
-                if (Options.EnableAsn && _asnResolver is not null && !hop.AsnResolved)
-                    ScheduleAsnResolution(hopIndex, result.Address!, ct);
+                    if (!hop.DnsResolved)
+                        ScheduleDnsResolution(hopIndex, result.Address!, ct);
+
+                    if (Options.EnableAsn && _asnResolver is not null && !hop.AsnResolved)
+                        ScheduleAsnResolution(hopIndex, result.Address!, ct);
+                }
             }
             else
             {
@@ -232,6 +277,23 @@ public sealed class TracerouteSession : ITracerouteSession
         lock (_statsLock)
         {
             _hops[hopIndex].SetHostName(hostName);
+        }
+    }
+
+    private void ScheduleAltDnsResolution(int hopIndex, int altIndex, IPAddress address, CancellationToken ct)
+    {
+        _ = ResolveAltDnsAsync(hopIndex, altIndex, address, ct);
+    }
+
+    private async Task ResolveAltDnsAsync(int hopIndex, int altIndex, IPAddress address, CancellationToken ct)
+    {
+        string? hostName = await _dnsResolver
+            .ResolveAsync(address, ct)
+            .ConfigureAwait(false);
+
+        lock (_statsLock)
+        {
+            _hops[hopIndex].SetAltHostName(altIndex, hostName);
         }
     }
 

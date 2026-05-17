@@ -39,4 +39,9 @@ public interface ITracerouteSession : IAsyncDisposable
     /// Returns <see langword="false"/> if <paramref name="hopIndex"/> is out of range.
     /// </summary>
     bool TryGetHop(int hopIndex, out HopStats stats);
+
+    /// <summary>
+    /// Resets all accumulated hop statistics so counts start fresh from zero.
+    /// </summary>
+    void ResetStats();
 }

@@ -74,6 +74,65 @@ public struct HopStats
     /// <summary>Reverse-DNS hostname for this hop, populated asynchronously.</summary>
     public string? HostName => _hostName;
 
+    // ── ECMP / load-balanced alternate addresses ──────────────────────────────
+    // Populated when probes at this TTL return from more than one distinct IP
+    // (Equal-Cost Multi-Path routing).  The primary address is tracked in _address;
+    // additional ones live here.  Cap at 8 to keep memory bounded.
+    private const int MaxAltAddresses = 8;
+    private List<System.Net.IPAddress>? _altAddresses;
+    private List<string?>? _altHostNames;       // parallel to _altAddresses; null = not yet resolved
+    private List<bool>?    _altDnsResolved;      // parallel; true once PTR lookup attempted
+
+    /// <summary>Number of additional (ECMP) addresses seen at this hop.</summary>
+    public int AltAddressCount => _altAddresses?.Count ?? 0;
+
+    /// <summary>
+    /// Registers <paramref name="address"/> as an alternate ECMP address if it is new.
+    /// Returns <see langword="true"/> when the address was added and DNS should be scheduled.
+    /// Must be called under the session stats lock.
+    /// </summary>
+    public bool TryRegisterAltAddress(System.Net.IPAddress address)
+    {
+        // Primary address is not an "alt".
+        if (_address is not null && _address.Equals(address)) return false;
+
+        _altAddresses ??= new List<System.Net.IPAddress>(2);
+        foreach (var a in _altAddresses)
+            if (a.Equals(address)) return false;
+
+        if (_altAddresses.Count >= MaxAltAddresses) return false;
+
+        _altAddresses.Add(address);
+        (_altHostNames  ??= new List<string?>(2)).Add(null);
+        (_altDnsResolved ??= new List<bool>(2)).Add(false);
+        return true;
+    }
+
+    /// <summary>Returns the IP address at <paramref name="altIndex"/> (0-based).</summary>
+    public System.Net.IPAddress GetAltAddress(int altIndex) => _altAddresses![altIndex];
+
+    /// <summary>Returns the resolved hostname for the alt address at <paramref name="altIndex"/>, or <see langword="null"/>.</summary>
+    public string? GetAltHostName(int altIndex) => _altHostNames?[altIndex];
+
+    /// <summary>Returns <see langword="true"/> if DNS has been attempted for the alt address at <paramref name="altIndex"/>.</summary>
+    public bool IsAltDnsResolved(int altIndex) => _altDnsResolved?[altIndex] ?? false;
+
+    /// <summary>Sets the resolved hostname for the alt address at <paramref name="altIndex"/>.</summary>
+    public void SetAltHostName(int altIndex, string? hostName)
+    {
+        if (_altHostNames is null || altIndex >= _altHostNames.Count) return;
+        _altHostNames[altIndex] = hostName;
+        if (_altDnsResolved is not null && altIndex < _altDnsResolved.Count)
+            _altDnsResolved[altIndex] = true;
+    }
+
+    /// <summary>Marks the alt DNS slot as resolved (used to avoid duplicate lookups).</summary>
+    public void MarkAltDnsScheduled(int altIndex)
+    {
+        if (_altDnsResolved is not null && altIndex < _altDnsResolved.Count)
+            _altDnsResolved[altIndex] = true;
+    }
+
     // ── ASN ───────────────────────────────────────────────────────────────────
     private AsnInfo? _asn;
 
@@ -192,6 +251,9 @@ public struct HopStats
         _hasPrevRtt = false;
         _asn = null;
         AsnResolved = false;
+        _altAddresses?.Clear();
+        _altHostNames?.Clear();
+        _altDnsResolved?.Clear();
     }
 
     /// <summary>
