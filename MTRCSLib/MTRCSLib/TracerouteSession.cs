@@ -152,45 +152,34 @@ public sealed class TracerouteSession : ITracerouteSession
 
     private async Task RunOneCycleAsync(CancellationToken ct)
     {
+        using IPinger pinger = _pingerFactory.Create();
         int hopCount = Options.MaxHops;
 
-        // Fire all TTL probes concurrently — each gets its own IPinger instance so
-        // they don't share socket state.  This matches MTR's behaviour and means
-        // a firewall that silently drops packets only costs one timeout worth of
-        // latency for the whole cycle, not N × timeout.
-        Task<ProbeResult>[] probes = new Task<ProbeResult>[hopCount];
+        // Probe TTLs 1..MaxHops sequentially with a single pinger per cycle, stopping
+        // as soon as the destination replies (Success).  This avoids sending probes
+        // beyond the known destination and matches traditional MTR behaviour.
+        // Show the last TTL that received any response (TtlExpired) when destination
+        // is not yet reached, or 1 row minimum so the UI is never blank.
+        int newActiveHops = 1;
         for (int ttl = 1; ttl <= hopCount; ttl++)
         {
-            int capturedTtl = ttl;
             ushort seq = unchecked(_sequence++);
-            probes[ttl - 1] = ProbeHopAsync(capturedTtl, seq, ct);
-        }
+            ProbeResult result = await ProbeHopAsync(pinger, ttl, seq, ct).ConfigureAwait(false);
 
-        ProbeResult[] results = await Task.WhenAll(probes).ConfigureAwait(false);
-
-        // Determine how many rows to display:
-        // - Stop at the first TTL that reached the destination (Success).
-        // - Otherwise show up to the last TTL that received any response (TtlExpired).
-        // - If nothing responded at all, show 1 row so the UI isn't blank.
-        int newActiveHops = 1;
-        for (int i = 0; i < results.Length; i++)
-        {
-            if (results[i].Status == PingStatus.Success)
+            if (result.Status == PingStatus.Success)
             {
-                newActiveHops = i + 1;
+                newActiveHops = ttl;
                 break;
             }
-            if (results[i].Status == PingStatus.TtlExpired)
-                newActiveHops = i + 1; // keep extending until no more responses
+            if (result.Status == PingStatus.TtlExpired)
+                newActiveHops = ttl; // keep extending until no more responses
         }
 
         Volatile.Write(ref _activeHopCount, newActiveHops);
     }
 
-    private async Task<ProbeResult> ProbeHopAsync(int ttl, ushort seq, CancellationToken ct)
+    private async Task<ProbeResult> ProbeHopAsync(IPinger pinger, int ttl, ushort seq, CancellationToken ct)
     {
-        using IPinger pinger = _pingerFactory.Create();
-
         ProbeResult result = await pinger.SendProbeAsync(
             Options.Target,
             ttl,
