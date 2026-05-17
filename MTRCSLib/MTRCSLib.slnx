@@ -1,4 +1,8 @@
 <Solution>
+  <Folder Name="/Root/">
+    <File Path="../.github/workflows/ci.yml" />
+    <File Path="../.github/workflows/release.yml" />
+  </Folder>
   <Project Path="MTRCS/MTRCS.csproj" />
   <Project Path="MTRCSLib.Tests/MTRCSLib.Tests.csproj" />
   <Project Path="MTRCSLib/MTRCSLib.csproj" />
