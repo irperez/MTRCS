@@ -37,14 +37,25 @@ internal sealed class MtrAnsiRenderer
 
     // Two spaces between every column.
     private const string ColSep = "  ";
+    private const int ColSepW = 2;
+
+    // Total width of the stats section (Loss%..Jitter), not including ASN.
+    // Loss%(7)+Sep(2)+Snt(5)+Sep(2)+Last(7)+Sep(2)+Avg(7)+Sep(2)+Best(7)+Sep(2)+Wrst(7)+Sep(2)+StDev(7)+Sep(2)+Jitter(7) = 66
+    private const int W_Stats = W_Loss + ColSepW + W_Snt + ColSepW
+                              + W_Rtt + ColSepW + W_Rtt + ColSepW
+                              + W_Rtt + ColSepW + W_Rtt + ColSepW
+                              + W_Rtt + ColSepW + W_Rtt;   // = 66
 
     // ── pre-encoded constant byte sequences ───────────────────────────────────
 
     // Header row bytes, encoded once at construction.
     private readonly byte[] _titleBytes;
     private readonly byte[] _keysBytes;
-    private readonly byte[] _subHeaderBytes;
-    private readonly byte[] _headerBytes;
+    private readonly byte[] _subHeaderBytes;   // kept for narrow-terminal fallback
+    private readonly byte[] _headerBytes;       // kept for narrow-terminal fallback
+    private readonly byte[] _hostHeaderBytes;   // "HOST" left-padded to W_Host, bold
+    private readonly byte[] _statsHeaderBytes;  // "Loss%  Snt  Last  Avg  Best  Wrst  StDev  Jitter" bold
+    private readonly byte[] _asnHeaderBytes;    // "ASN" bold
     private readonly bool _showAsn;
 
     // ── start timestamp ───────────────────────────────────────────────────────
@@ -88,12 +99,15 @@ internal sealed class MtrAnsiRenderer
         string titleHost = options.Host.Equals(targetIp, StringComparison.Ordinal)
             ? options.Host
             : $"{options.Host} ({targetIp})";
-        _titleBytes     = EncodeTitleLine(titleHost);
-        _keysBytes      = EncodeKeysLine();
-        _subHeaderBytes = EncodeSubHeaderLine(options.EnableAsn);
-        _headerBytes    = EncodeHeaderLine(options.EnableAsn);
-        _showAsn        = options.EnableAsn;
-        _startedAt      = DateTime.Now;
+        _titleBytes       = EncodeTitleLine(titleHost);
+        _keysBytes        = EncodeKeysLine();
+        _subHeaderBytes   = EncodeSubHeaderLine(options.EnableAsn);
+        _headerBytes      = EncodeHeaderLine(options.EnableAsn);
+        _hostHeaderBytes  = EncodeHostHeaderBytes();
+        _statsHeaderBytes = EncodeStatsHeaderBytes();
+        _asnHeaderBytes   = EncodeAsnHeaderBytes();
+        _showAsn          = options.EnableAsn;
+        _startedAt        = DateTime.Now;
 
         // 16 KB frame buffer — ample for 30 hops × ~150 bytes + title/header overhead.
         _writer = new AnsiWriter(16 * 1024);
@@ -129,8 +143,8 @@ internal sealed class MtrAnsiRenderer
 
         // ── title + start timestamp ────────────────────────────────────────────
         _writer.WriteRaw(_titleBytes);
+        _writer.EraseEol();         // clear stale chars before jumping to timestamp position
         WriteTitleTimestamp();
-        _writer.EraseEol();
         _writer.NewLine();
 
         // ── keys bar ──────────────────────────────────────────────────────────
@@ -139,12 +153,13 @@ internal sealed class MtrAnsiRenderer
         _writer.NewLine();
 
         // ── Packets / Pings sub-header ────────────────────────────────────────
-        _writer.WriteRaw(_subHeaderBytes);
+        _writer.EraseEol();
+        WriteSubHeader();
         _writer.EraseEol();
         _writer.NewLine();
 
         // ── column header ─────────────────────────────────────────────────────
-        _writer.WriteRaw(_headerBytes);
+        WriteHeader();
         _writer.EraseEol();
         _writer.NewLine();
 
@@ -196,6 +211,76 @@ internal sealed class MtrAnsiRenderer
 
     // ── private: frame composition ────────────────────────────────────────────
 
+    // Moves the cursor so the stats section (Loss%..Jitter[+ASN]) ends at the right terminal edge.
+    private void MoveToStatsColumn()
+    {
+        int statsWidth = W_Stats + (_showAsn ? ColSepW + W_Asn : 0);
+        int consoleWidth = Console.WindowWidth;
+        // Leave at least W_Host chars for the host column; if terminal is too narrow, don't jump.
+        int col = consoleWidth - statsWidth;
+        if (col <= W_Host) return;
+        _writer.MoveCursorToColumn(col);
+    }
+
+    // Writes sub-header ("Packets" / "Pings") right-aligned to match MoveToStatsColumn.
+    private void WriteSubHeader()
+    {
+        int statsWidth = W_Stats + (_showAsn ? ColSepW + W_Asn : 0);
+        int consoleWidth = Console.WindowWidth;
+        int statsStart = consoleWidth - statsWidth;   // leave 1-col margin at right edge
+        if (statsStart <= W_Host) return;
+
+        // "Packets" centred over Loss%+ColSep+Snt = 7+2+5 = 14 chars.
+        int packetsWidth = W_Loss + ColSepW + W_Snt;               // 14
+        int packetsCenter = statsStart + packetsWidth / 2 - 1;     // 1-based mid column
+
+        // "Pings" centred over Last..Jitter = ColSep(2)+6×(W_Rtt+ColSep) − trailing ColSep = 2+6×9−2 = 54 chars.
+        int pingsStart = statsStart + packetsWidth + ColSepW;
+        int pingsWidth = W_Rtt + ColSepW + W_Rtt + ColSepW + W_Rtt + ColSepW + W_Rtt + ColSepW + W_Rtt + ColSepW + W_Rtt; // 6×7 + 5×2 = 52
+        int pingsCenter = pingsStart + pingsWidth / 2 - 1;
+
+        _writer.Bold();
+        // Write "Packets" centred: move to (packetsCenter - "Packets".Length/2 + 1).
+        int packetsCol = packetsCenter - 3;  // "Packets"(7) half = 3
+        if (packetsCol >= 1) _writer.MoveCursorToColumn(packetsCol);
+        _writer.Write("Packets");
+
+        // Write "Pings" centred.
+        int pingsCol = pingsCenter - 2;      // "Pings"(5) half = 2
+        if (pingsCol > packetsCol + 7) _writer.MoveCursorToColumn(pingsCol);
+        _writer.Write("Pings");
+        _writer.Reset();
+    }
+
+    // Writes the column header row right-aligned to match MoveToStatsColumn.
+    private void WriteHeader()
+    {
+        int statsWidth = W_Stats + (_showAsn ? ColSepW + W_Asn : 0);
+        int consoleWidth = Console.WindowWidth;
+        int statsStart = consoleWidth - statsWidth;   // leave 1-col margin at right edge
+        if (statsStart <= W_Host)
+        {
+            // Terminal too narrow — fall back to pre-encoded fixed header.
+            _writer.WriteRaw(_headerBytes);
+            return;
+        }
+
+        // HOST label left-aligned at column 1, then jump to stats start.
+        _writer.WriteRaw(_hostHeaderBytes);
+        _writer.EraseEol();
+        _writer.MoveCursorToColumn(statsStart);
+
+        _writer.WriteRaw(_statsHeaderBytes);
+
+        if (_showAsn)
+        {
+            _writer.Write(ColSep);
+            _writer.WriteRaw(_asnHeaderBytes);
+        }
+
+        _writer.Reset();
+    }
+
     private void WriteHopLine(int hopIndex, in HopStats h, Span<char> numBuf)
     {
         bool hasRtt = h.Sent > h.Lost;
@@ -203,7 +288,10 @@ internal sealed class MtrAnsiRenderer
         // ── HOST column (pre-encoded, cached) ─────────────────────────────────
         byte[] hostBytes = GetOrBuildHostBytes(hopIndex, in h);
         _writer.WriteRaw(hostBytes);
-        _writer.Write(ColSep);
+
+        // Erase remaining host area, then jump so stats right-align to the terminal edge.
+        _writer.EraseEol();
+        MoveToStatsColumn();
 
         // ── Loss% ─────────────────────────────────────────────────────────────
         WriteColoredRttColumn(h.LossPercent, numBuf, isLoss: true);
@@ -577,6 +665,47 @@ internal sealed class MtrAnsiRenderer
         dest[..pad].Fill((byte)' ');
         text.CopyTo(dest[pad..]);
         return pad + text.Length;
+    }
+
+    // Encodes just the "HOST" label left-padded to W_Host, bold — no stats.
+    private static byte[] EncodeHostHeaderBytes()
+    {
+        byte[] buf = new byte[64];
+        int pos = 0;
+        "\x1B[1m"u8.CopyTo(buf.AsSpan(pos)); pos += 4;          // bold
+        ReadOnlySpan<byte> hostHdr = "HOST"u8;
+        hostHdr.CopyTo(buf.AsSpan(pos)); pos += hostHdr.Length;
+        buf.AsSpan(pos, W_Host - hostHdr.Length).Fill((byte)' '); pos += W_Host - hostHdr.Length;
+        // no reset — caller will continue with EraseEol + MoveCursor
+        return buf[..pos];
+    }
+
+    // Encodes Loss%..Jitter column headers (right-aligned, bold, no reset).
+    private static byte[] EncodeStatsHeaderBytes()
+    {
+        byte[] buf = new byte[128];
+        int pos = 0;
+        pos += AppendRightAligned("Loss%"u8,  W_Loss, buf.AsSpan(pos));
+        pos += AppendRightAligned("  Snt"u8,  W_Snt  + 2, buf.AsSpan(pos));
+        pos += AppendRightAligned("  Last"u8, W_Rtt  + 2, buf.AsSpan(pos));
+        pos += AppendRightAligned("  Avg"u8,  W_Rtt  + 2, buf.AsSpan(pos));
+        pos += AppendRightAligned("  Best"u8, W_Rtt  + 2, buf.AsSpan(pos));
+        pos += AppendRightAligned("  Wrst"u8, W_Rtt  + 2, buf.AsSpan(pos));
+        pos += AppendRightAligned("  StDev"u8, W_Rtt + 2, buf.AsSpan(pos));
+        pos += AppendRightAligned("  Jitter"u8, W_Rtt + 2, buf.AsSpan(pos));
+        "\x1B[0m"u8.CopyTo(buf.AsSpan(pos)); pos += 4;          // reset
+        return buf[..pos];
+    }
+
+    // Encodes "ASN" column header (right-aligned, bold, reset).
+    private static byte[] EncodeAsnHeaderBytes()
+    {
+        byte[] buf = new byte[32];
+        int pos = 0;
+        "\x1B[1m"u8.CopyTo(buf.AsSpan(pos)); pos += 4;
+        pos += AppendRightAligned("ASN"u8, W_Asn, buf.AsSpan(pos));
+        "\x1B[0m"u8.CopyTo(buf.AsSpan(pos)); pos += 4;
+        return buf[..pos];
     }
 
     private enum ColorKind { Grey, Cyan }
