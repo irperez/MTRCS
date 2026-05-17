@@ -40,6 +40,15 @@ public readonly struct TracerouteOptions
     /// <summary>When <see langword="true"/>, the session resolves ASN info for each hop via Team Cymru DNS.</summary>
     public bool EnableAsn { get; }
 
+    /// <summary>Probe protocol: ICMP (default), TCP SYN (-T), or UDP (-u).</summary>
+    public ProbeMode Mode { get; }
+
+    /// <summary>
+    /// Destination port used for TCP/UDP probes.
+    /// Default: 80 for TCP, 33434 for UDP, ignored for ICMP.
+    /// </summary>
+    public int Port { get; }
+
     private TracerouteOptions(
         IPAddress target,
         string host,
@@ -47,7 +56,9 @@ public readonly struct TracerouteOptions
         int intervalMs,
         int timeoutMs,
         int payloadBytes,
-        bool enableAsn)
+        bool enableAsn,
+        ProbeMode mode,
+        int port)
     {
         Target = target;
         Host = host;
@@ -56,6 +67,8 @@ public readonly struct TracerouteOptions
         TimeoutMs = timeoutMs;
         PayloadBytes = payloadBytes;
         EnableAsn = enableAsn;
+        Mode = mode;
+        Port = port;
     }
 
     /// <summary>
@@ -68,7 +81,9 @@ public readonly struct TracerouteOptions
         int intervalMs = DefaultIntervalMs,
         int timeoutMs = DefaultTimeoutMs,
         int payloadBytes = DefaultPayloadBytes,
-        bool enableAsn = false)
+        bool enableAsn = false,
+        ProbeMode mode = ProbeMode.Icmp,
+        int port = 0)
     {
         ArgumentNullException.ThrowIfNull(target);
         ArgumentNullException.ThrowIfNull(host);
@@ -83,8 +98,18 @@ public readonly struct TracerouteOptions
             throw new ArgumentOutOfRangeException(nameof(timeoutMs), "Must be positive.");
         if (payloadBytes < 0)
             throw new ArgumentOutOfRangeException(nameof(payloadBytes), "Must be non-negative.");
+        if (port < 0 || port > 65535)
+            throw new ArgumentOutOfRangeException(nameof(port), "Must be between 0 and 65535.");
 
-        return new TracerouteOptions(target, host, maxHops, intervalMs, timeoutMs, payloadBytes, enableAsn);
+        // Resolve default port per mode when caller passes 0.
+        int resolvedPort = port != 0 ? port : mode switch
+        {
+            ProbeMode.Tcp => 80,
+            ProbeMode.Udp => UdpPinger.DefaultUdpPort,
+            _ => 0,
+        };
+
+        return new TracerouteOptions(target, host, maxHops, intervalMs, timeoutMs, payloadBytes, enableAsn, mode, resolvedPort);
     }
 
     /// <summary>
@@ -99,6 +124,8 @@ public readonly struct TracerouteOptions
         int timeoutMs = DefaultTimeoutMs,
         int payloadBytes = DefaultPayloadBytes,
         bool enableAsn = false,
+        ProbeMode mode = ProbeMode.Icmp,
+        int port = 0,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(host);
@@ -108,7 +135,7 @@ public readonly struct TracerouteOptions
         {
             if (!NetworkUtils.IsIPv4(parsed))
                 throw new ArgumentException("Only IPv4 targets are supported.", nameof(host));
-            return Create(parsed, host, maxHops, intervalMs, timeoutMs, payloadBytes, enableAsn);
+            return Create(parsed, host, maxHops, intervalMs, timeoutMs, payloadBytes, enableAsn, mode, port);
         }
 
         IPAddress[] addresses = await Dns.GetHostAddressesAsync(host, System.Net.Sockets.AddressFamily.InterNetwork, cancellationToken).ConfigureAwait(false);
@@ -116,6 +143,6 @@ public readonly struct TracerouteOptions
         if (addresses.Length == 0)
             throw new InvalidOperationException($"No IPv4 address found for host '{host}'.");
 
-        return Create(addresses[0], host, maxHops, intervalMs, timeoutMs, payloadBytes, enableAsn);
+        return Create(addresses[0], host, maxHops, intervalMs, timeoutMs, payloadBytes, enableAsn, mode, port);
     }
 }

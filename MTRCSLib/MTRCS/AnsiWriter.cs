@@ -23,6 +23,7 @@ internal sealed class AnsiWriter
     // Pre-encoded constant sequences (ASCII — single byte per char).
     private static ReadOnlySpan<byte> CursorHome       => "\x1B[H"u8;
     private static ReadOnlySpan<byte> EraseToLineEnd   => "\x1B[K"u8;
+    private static ReadOnlySpan<byte> EraseToScreenEnd => "\x1B[J"u8;
     private static ReadOnlySpan<byte> ResetColor       => "\x1B[0m"u8;
     private static ReadOnlySpan<byte> BoldOn           => "\x1B[1m"u8;
     private static ReadOnlySpan<byte> ColorCyan        => "\x1B[96m"u8;
@@ -31,6 +32,8 @@ internal sealed class AnsiWriter
     private static ReadOnlySpan<byte> ColorYellow      => "\x1B[93m"u8;
     private static ReadOnlySpan<byte> HideCursor       => "\x1B[?25l"u8;
     private static ReadOnlySpan<byte> ShowCursor       => "\x1B[?25h"u8;
+    private static ReadOnlySpan<byte> EnterAltScreen   => "\x1B[?1049h"u8;
+    private static ReadOnlySpan<byte> LeaveAltScreen   => "\x1B[?1049l"u8;
 
     /// <param name="bufferBytes">
     /// Pre-allocated frame buffer size in bytes.
@@ -53,8 +56,17 @@ internal sealed class AnsiWriter
     /// <summary>Restores cursor visibility after the live loop exits.</summary>
     internal void ShowCaret()  => WriteRaw(ShowCursor);
 
+    /// <summary>Switches to the terminal alternate screen buffer (saves the normal screen).</summary>
+    internal void EnterAlternateScreen() => WriteRaw(EnterAltScreen);
+
+    /// <summary>Restores the normal screen buffer (discards alternate screen content).</summary>
+    internal void LeaveAlternateScreen() => WriteRaw(LeaveAltScreen);
+
     /// <summary>Erases from the current cursor position to end of the current line.</summary>
     internal void EraseEol()   => WriteRaw(EraseToLineEnd);
+
+    /// <summary>Erases from the current cursor position to the end of the screen (clears all rows below).</summary>
+    internal void EraseToEnd() => WriteRaw(EraseToScreenEnd);
 
     // ── color ─────────────────────────────────────────────────────────────────
 

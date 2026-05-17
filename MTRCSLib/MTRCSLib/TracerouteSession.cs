@@ -152,57 +152,76 @@ public sealed class TracerouteSession : ITracerouteSession
 
     private async Task RunOneCycleAsync(CancellationToken ct)
     {
-        using IPinger pinger = _pingerFactory.Create();
+        int hopCount = Options.MaxHops;
 
-        int maxActiveHop = 0;
-
-        for (int ttl = 1; ttl <= Options.MaxHops && !ct.IsCancellationRequested; ttl++)
+        // Fire all TTL probes concurrently — each gets its own IPinger instance so
+        // they don't share socket state.  This matches MTR's behaviour and means
+        // a firewall that silently drops packets only costs one timeout worth of
+        // latency for the whole cycle, not N × timeout.
+        Task<ProbeResult>[] probes = new Task<ProbeResult>[hopCount];
+        for (int ttl = 1; ttl <= hopCount; ttl++)
         {
+            int capturedTtl = ttl;
             ushort seq = unchecked(_sequence++);
-
-            ProbeResult result = await pinger.SendProbeAsync(
-                Options.Target,
-                ttl,
-                seq,
-                Options.TimeoutMs,
-                Options.PayloadBytes,
-                ct).ConfigureAwait(false);
-
-            int hopIndex = ttl - 1;
-
-            lock (_statsLock)
-            {
-                ref HopStats hop = ref _hops[hopIndex];
-
-                if (result.Status is PingStatus.Success or PingStatus.TtlExpired)
-                {
-                    // result.Address is non-null for these statuses (set by ProbeResult.FromResponse).
-                    hop.RecordSuccess(result.Address!, result.RoundTripMs);
-                    maxActiveHop = ttl;
-
-                    // Fire DNS resolution on first sighting of this address.
-                    if (!hop.DnsResolved)
-                        ScheduleDnsResolution(hopIndex, result.Address!, ct);
-
-                    // Fire ASN resolution on first sighting of this address (if enabled).
-                    if (Options.EnableAsn && _asnResolver is not null && !hop.AsnResolved)
-                        ScheduleAsnResolution(hopIndex, result.Address!, ct);
-                }
-                else
-                {
-                    hop.RecordLoss();
-                    // Still count non-responding hops up to this TTL.
-                    if (ttl > maxActiveHop) maxActiveHop = ttl;
-                }
-            }
-
-            // Stop TTL loop once we've reached the destination.
-            if (result.Status == PingStatus.Success)
-                break;
+            probes[ttl - 1] = ProbeHopAsync(capturedTtl, seq, ct);
         }
 
-        // Update the active hop count so the UI knows how many rows to render.
-        Volatile.Write(ref _activeHopCount, maxActiveHop);
+        ProbeResult[] results = await Task.WhenAll(probes).ConfigureAwait(false);
+
+        // Determine how many rows to display:
+        // - Stop at the first TTL that reached the destination (Success).
+        // - Otherwise show up to the last TTL that received any response (TtlExpired).
+        // - If nothing responded at all, show 1 row so the UI isn't blank.
+        int newActiveHops = 1;
+        for (int i = 0; i < results.Length; i++)
+        {
+            if (results[i].Status == PingStatus.Success)
+            {
+                newActiveHops = i + 1;
+                break;
+            }
+            if (results[i].Status == PingStatus.TtlExpired)
+                newActiveHops = i + 1; // keep extending until no more responses
+        }
+
+        Volatile.Write(ref _activeHopCount, newActiveHops);
+    }
+
+    private async Task<ProbeResult> ProbeHopAsync(int ttl, ushort seq, CancellationToken ct)
+    {
+        using IPinger pinger = _pingerFactory.Create();
+
+        ProbeResult result = await pinger.SendProbeAsync(
+            Options.Target,
+            ttl,
+            seq,
+            Options.TimeoutMs,
+            Options.PayloadBytes,
+            ct).ConfigureAwait(false);
+
+        int hopIndex = ttl - 1;
+
+        lock (_statsLock)
+        {
+            ref HopStats hop = ref _hops[hopIndex];
+
+            if (result.Status is PingStatus.Success or PingStatus.TtlExpired)
+            {
+                hop.RecordSuccess(result.Address!, result.RoundTripMs);
+
+                if (!hop.DnsResolved)
+                    ScheduleDnsResolution(hopIndex, result.Address!, ct);
+
+                if (Options.EnableAsn && _asnResolver is not null && !hop.AsnResolved)
+                    ScheduleAsnResolution(hopIndex, result.Address!, ct);
+            }
+            else
+            {
+                hop.RecordLoss();
+            }
+        }
+
+        return result;
     }
 
     // ── DNS ───────────────────────────────────────────────────────────────────

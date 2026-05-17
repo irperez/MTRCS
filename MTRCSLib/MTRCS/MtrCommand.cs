@@ -55,6 +55,21 @@ internal sealed class MtrCommand : AsyncCommand<MtrCommand.Settings>
         [DefaultValue(false)]
         public bool ShowAsn { get; init; }
 
+        [Description("Use TCP SYN probes instead of ICMP (bypasses ICMP firewalls).")]
+        [CommandOption("-T|--tcp")]
+        [DefaultValue(false)]
+        public bool UseTcp { get; init; }
+
+        [Description("Use UDP probes instead of ICMP (bypasses ICMP firewalls).")]
+        [CommandOption("-u|--udp")]
+        [DefaultValue(false)]
+        public bool UseUdp { get; init; }
+
+        [Description("Destination port for TCP/UDP probes. Default: 80 for TCP, 33434 for UDP.")]
+        [CommandOption("-P|--port")]
+        [DefaultValue(0)]
+        public int Port { get; init; }
+
         [Description("Output file path for report export (requires --report).")]
         [CommandOption("-o|--output")]
         public string? OutputPath { get; init; }
@@ -78,6 +93,10 @@ internal sealed class MtrCommand : AsyncCommand<MtrCommand.Settings>
                 return ValidationResult.Error("--size must be non-negative.");
             if (ReportCycles < 1)
                 return ValidationResult.Error("--cycles must be at least 1.");
+            if (UseTcp && UseUdp)
+                return ValidationResult.Error("--tcp and --udp are mutually exclusive.");
+            if (Port is < 0 or > 65535)
+                return ValidationResult.Error("--port must be between 0 and 65535.");
             if (OutputPath is not null && !Report)
                 return ValidationResult.Error("--output requires --report mode.");
             if (OutputFormat is not ("text" or "csv" or "json"))
@@ -95,13 +114,19 @@ internal sealed class MtrCommand : AsyncCommand<MtrCommand.Settings>
         try
         {
             AnsiConsole.MarkupLine($"[grey]Resolving[/] [bold]{settings.Host}[/][grey]...[/]");
+            ProbeMode mode = settings.UseTcp ? ProbeMode.Tcp
+                           : settings.UseUdp ? ProbeMode.Udp
+                           : ProbeMode.Icmp;
+
             options = await TracerouteOptions.ResolveAsync(
                 settings.Host,
                 settings.MaxHops,
                 settings.IntervalMs,
                 settings.TimeoutMs,
                 settings.PayloadBytes,
-                settings.ShowAsn).ConfigureAwait(false);
+                settings.ShowAsn,
+                mode,
+                settings.Port).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -117,7 +142,18 @@ internal sealed class MtrCommand : AsyncCommand<MtrCommand.Settings>
             cts.Cancel();
         };
 
-        IPingerFactory pingerFactory = new SystemPingerFactory(settings.PayloadBytes);
+        using IDisposable? factoryDisposable = options.Mode switch
+        {
+            ProbeMode.Tcp => new TcpPingerFactory(options.Port),
+            ProbeMode.Udp => new UdpPingerFactory(options.Port),
+            _ => null,
+        };
+        IPingerFactory pingerFactory = options.Mode switch
+        {
+            ProbeMode.Tcp => (TcpPingerFactory)factoryDisposable!,
+            ProbeMode.Udp => (UdpPingerFactory)factoryDisposable!,
+            _ => new SystemPingerFactory(settings.PayloadBytes),
+        };
         IDnsResolver dnsResolver = new SystemDnsResolver();
         IAsnResolver? asnResolver = settings.ShowAsn ? new CymruAsnResolver() : null;
 

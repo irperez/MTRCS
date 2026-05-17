@@ -93,17 +93,19 @@ internal sealed class MtrAnsiRenderer
 
     // ── public API ────────────────────────────────────────────────────────────
 
-    /// <summary>Hides the cursor once before the render loop starts.</summary>
+    /// <summary>Switches to the alternate screen buffer and hides the cursor before the render loop starts.</summary>
     internal void BeginLive()
     {
+        _writer.EnterAlternateScreen();
         _writer.HideCaret();
         _writer.Flush();
     }
 
-    /// <summary>Restores the cursor after the render loop exits.</summary>
+    /// <summary>Restores the cursor and returns to the normal screen buffer after the render loop exits.</summary>
     internal void EndLive()
     {
         _writer.ShowCaret();
+        _writer.LeaveAlternateScreen();
         _writer.Flush();
     }
 
@@ -147,6 +149,8 @@ internal sealed class MtrAnsiRenderer
             WriteHopLine(i, in h, numBuf);
         }
 
+        // Clear any rows left over from a previous frame that had more hops.
+        _writer.EraseToEnd();
         _writer.Flush();
     }
 
