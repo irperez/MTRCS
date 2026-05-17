@@ -4,11 +4,6 @@
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
-    <!-- AssemblyVersion must be major.minor.build.revision with each part ≤ 65535.
-         The CI version string (e.g. 0.20260517.1-pre) is not compatible with that
-         constraint, so we pin a safe explicit value and let NuGet/informational
-         version carry the full semver. -->
-    <AssemblyVersion>1.0.0.0</AssemblyVersion>
   </PropertyGroup>
 
   <ItemGroup>
