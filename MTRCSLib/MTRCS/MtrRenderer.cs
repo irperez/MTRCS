@@ -1,106 +1,40 @@
 using MTRCSLib;
 using MTRCSLib.Abstractions;
-using Spectre.Console;
 
 namespace MTRCS;
 
 /// <summary>
-/// Builds and refreshes a Spectre.Console <see cref="Table"/> that mimics MTR's terminal output.
+/// Zero-allocation report renderer for MTR-style terminal output.
+/// Used only in <c>--report</c> mode; writes directly to stdout via <see cref="AnsiWriter"/>.
 ///
-/// MTR column layout:
-///   HOST                       Loss%   Snt   Last    Avg   Best   Wrst  StDev
-///
-/// All rendering is zero/low-allocation:
-///   <list type="bullet">
-///     <item>A single <see cref="HopStats"/> stack-span is reused each refresh cycle.</item>
-///     <item>Numeric formatting uses <c>TryFormat</c> into stack-allocated <see cref="Span{T}"/>.</item>
-///     <item>The <see cref="Table"/> object is rebuilt each frame (Spectre requires it for live
-///           updates) but the <see cref="TableTitle"/>, <see cref="TableColumn"/> objects, TTL
-///           prefix strings, and per-hop label markup are all pre-computed and reused.</item>
-///   </list>
+/// Column layout:
+///   HOST                                     Loss%    Snt   Last    Avg   Best   Wrst  StDev  Jitter
 /// </summary>
 internal sealed class MtrRenderer
 {
-    // Column indices (keep in sync with BuildTable column order)
-    private const int ColHost  = 0;
-    private const int ColLoss  = 1;
-    // Must match the Width() passed to the HOST TableColumn below.
-    private const int ColHostWidth = 40;
-    private const int ColSnt   = 2;
-    private const int ColLast  = 3;
-    private const int ColAvg   = 4;
-    private const int ColBest  = 5;
-    private const int ColWrst  = 6;
-    private const int ColStDev = 7;
-    private const int ColJitter = 8;
-    private const int ColAsn   = 9;
+    // ── column widths (chars) — must match MtrAnsiRenderer ───────────────────
+    private const int W_Host   = 40;
+    private const int W_Loss   =  7;
+    private const int W_Snt    =  5;
+    private const int W_Rtt    =  7;
+    private const int W_Asn    = 20;
+    private const string ColSep = "  ";
 
     private readonly TracerouteOptions _options;
-    // Reused snapshot buffer — avoids per-refresh heap allocation for the hop array.
     private readonly HopStats[] _snapBuffer;
 
-    // ── per-session cached objects (computed once in constructor) ─────────────
+    // ── pre-encoded constant sequences ───────────────────────────────────────
+    private readonly byte[] _titleBytes;
+    private readonly byte[] _headerBytes;
 
-    /// <summary>Title markup built once from the resolved target; reused every frame.</summary>
-    private readonly TableTitle _tableTitle;
-
-    /// <summary>Column descriptors built once; reused every frame.</summary>
-    private TableColumn[] _columns;
-
-    /// <summary>
-    /// TTL prefix strings, e.g. _ttlPrefixes[0] == " 1." for hop 1 (1-based TTL, 0-based index).
-    /// Pre-computed to avoid per-frame int.ToString() + interpolation.
-    /// </summary>
+    // ── per-hop caches ────────────────────────────────────────────────────────
     private readonly string[] _ttlPrefixes;
-
-    // ── per-hop label cache ───────────────────────────────────────────────────
-
-    /// <summary>
-    /// Cached rendered HOST-column markup per hop slot.
-    /// Invalidated when the hop's address or hostname changes.
-    /// </summary>
-    private readonly string?[] _hopLabelCache;
-
-    /// <summary>Last address string seen for each hop slot (used to detect changes).</summary>
-    private readonly string?[] _hopLastAddress;
-
-    /// <summary>Last hostname seen for each hop slot (used to detect changes).</summary>
-    private readonly string?[] _hopLastHostName;
 
     internal MtrRenderer(TracerouteOptions options)
     {
-        _options = options;
+        _options    = options;
         _snapBuffer = new HopStats[options.MaxHops];
 
-        // Pre-compute table title (once per session).
-        string targetIp = options.Target.ToString();
-        string titleHost = options.Host.Equals(targetIp, StringComparison.Ordinal)
-            ? options.Host
-            : $"{options.Host} ({targetIp})";
-        _tableTitle = new TableTitle($"[bold]mtrcs[/]  [cyan]{titleHost}[/]  [grey]Keys: q=quit[/]");
-
-        // Pre-compute column descriptors (Spectre doesn't mutate them after AddColumn).
-        _columns =
-        [
-            new TableColumn("[bold]HOST[/]").LeftAligned().Width(40),
-            new TableColumn("[bold]Loss%[/]").RightAligned().Width(7),
-            new TableColumn("[bold]Snt[/]").RightAligned().Width(5),
-            new TableColumn("[bold]Last[/]").RightAligned().Width(7),
-            new TableColumn("[bold]Avg[/]").RightAligned().Width(7),
-            new TableColumn("[bold]Best[/]").RightAligned().Width(7),
-            new TableColumn("[bold]Wrst[/]").RightAligned().Width(7),
-            new TableColumn("[bold]StDev[/]").RightAligned().Width(7),
-            new TableColumn("[bold]Jitter[/]").RightAligned().Width(7),
-        ];
-
-        // Conditionally add ASN column.
-        if (options.EnableAsn)
-        {
-            Array.Resize(ref _columns, _columns.Length + 1);
-            _columns[^1] = new TableColumn("[bold]ASN[/]").LeftAligned().Width(22);
-        }
-
-        // Pre-compute TTL prefix strings " 1." … "NN." for every possible hop slot.
         _ttlPrefixes = new string[options.MaxHops];
         for (int i = 0; i < options.MaxHops; i++)
         {
@@ -108,178 +42,203 @@ internal sealed class MtrRenderer
             _ttlPrefixes[i] = ttl < 10 ? $" {ttl}." : $"{ttl}.";
         }
 
-        // Allocate per-hop label cache.
-        _hopLabelCache    = new string?[options.MaxHops];
-        _hopLastAddress   = new string?[options.MaxHops];
-        _hopLastHostName  = new string?[options.MaxHops];
-    }
+        string targetIp = options.Target.ToString();
+        string titleHost = options.Host.Equals(targetIp, StringComparison.Ordinal)
+            ? options.Host
+            : $"{options.Host} ({targetIp})";
 
-    /// <summary>Returns an empty table with columns — used as the initial live target.</summary>
-    internal Table BuildTable() => CreateTable(0, ReadOnlySpan<HopStats>.Empty);
+        _titleBytes  = EncodeTitleLine(titleHost);
+        _headerBytes = EncodeHeaderLine(options.EnableAsn);
+    }
 
     /// <summary>
-    /// Reads a snapshot from <paramref name="session"/> and returns a fully-populated table.
-    /// Called from the render loop at ~10 Hz; allocates only the strings Spectre needs.
+    /// Snapshots <paramref name="session"/> and writes the full report table to stdout.
     /// </summary>
-    internal Table Refresh(ITracerouteSession session)
+    internal void Render(ITracerouteSession session)
     {
         int count = session.SnapshotHops(_snapBuffer);
-        return CreateTable(count, _snapBuffer.AsSpan(0, count));
-    }
+        var writer = new AnsiWriter(8 * 1024);
 
-    // ── private helpers ───────────────────────────────────────────────────────
+        writer.WriteRaw(_titleBytes);
+        writer.NewLine();
+        writer.WriteRaw(_headerBytes);
+        writer.NewLine();
 
-    private Table CreateTable(int hopCount, ReadOnlySpan<HopStats> hops)
-    {
-        var table = new Table();
-        table.Border(TableBorder.None);
-        table.Expand();
-        table.ShowHeaders();
-
-        // Reuse the pre-computed title and column objects — avoids string interpolation
-        // and Spectre markup parsing on every 10 Hz frame.
-        table.Title = _tableTitle;
-        foreach (TableColumn col in _columns)
-            table.AddColumn(col);
-
-        if (hopCount == 0)
+        if (count == 0)
         {
-            // Fill the waiting row with empty cells for every column after the first.
-            string[] waitingRow = new string[_columns.Length];
-            waitingRow[0] = "[grey]Waiting for first probe cycle...[/]";
-            for (int c = 1; c < waitingRow.Length; c++) waitingRow[c] = "";
-            table.AddRow(waitingRow);
-            return table;
+            writer.Grey();
+            writer.Write("No hops recorded.");
+            writer.Reset();
+            writer.NewLine();
+            writer.Flush();
+            return;
         }
 
         Span<char> numBuf = stackalloc char[16];
 
-        for (int i = 0; i < hopCount; i++)
+        for (int i = 0; i < count; i++)
         {
-            ref readonly HopStats h = ref hops[i];
-
-            // ── HOST column ──────────────────────────────────────────────────
-            string hopLabel = GetOrBuildHopLabel(i, in h);
-
-            // ── Loss% ────────────────────────────────────────────────────────
-            string loss = FormatPercent(h.LossPercent, numBuf);
-            string lossMarkup = h.LossPercent >= 10.0
-                ? $"[red]{loss}[/]"
-                : h.LossPercent > 0.0
-                    ? $"[yellow]{loss}[/]"
-                    : loss;
-
-            // ── Snt ──────────────────────────────────────────────────────────
-            string snt = FormatInt(h.Sent, numBuf);
-
-            // ── RTT columns ──────────────────────────────────────────────────
-            bool hasRtt = h.Sent > h.Lost; // at least one reply
-
-            string last = hasRtt ? FormatMs(h.Last, numBuf) : "???";
-            string avg = hasRtt ? FormatMs(h.Average, numBuf) : "???";
-            string best = hasRtt && h.Best < double.MaxValue ? FormatMs(h.Best, numBuf) : "???";
-            string wrst = hasRtt && h.Worst > double.MinValue ? FormatMs(h.Worst, numBuf) : "???";
-            string stdev  = hasRtt ? FormatMs(h.StdDev, numBuf) : "???";
-            string jitter = !double.IsNaN(h.Jitter) ? FormatMs(h.Jitter, numBuf) : "???";
-
-            if (_options.EnableAsn)
-            {
-                string asnDisplay = !h.AsnResolved ? "..." : h.Asn?.ToString() ?? "???";
-                table.AddRow(hopLabel, lossMarkup, snt, last, avg, best, wrst, stdev, jitter,
-                    $"[grey]{EscapeMarkup(asnDisplay)}[/]");
-            }
-            else
-            {
-                table.AddRow(hopLabel, lossMarkup, snt, last, avg, best, wrst, stdev, jitter);
-            }
+            ref readonly HopStats h = ref _snapBuffer[i];
+            WriteHopLine(writer, i, in h, numBuf);
         }
 
-        return table;
+        writer.Flush();
     }
 
-    /// <summary>
-    /// Returns the HOST-column markup for hop slot <paramref name="hopIndex"/>, rebuilding it
-    /// only when the hop's address or hostname has changed since the last frame.
-    /// </summary>
-    private string GetOrBuildHopLabel(int hopIndex, in HopStats h)
-    {
-        string? currentAddress  = h.Address?.ToString();
-        string? currentHostName = h.HostName;
+    // ── private helpers ───────────────────────────────────────────────────────
 
-        // Return the cached label if nothing has changed.
-        if (_hopLabelCache[hopIndex] is not null &&
-            currentAddress  == _hopLastAddress[hopIndex] &&
-            currentHostName == _hopLastHostName[hopIndex])
+    private void WriteHopLine(AnsiWriter w, int hopIndex, in HopStats h, Span<char> numBuf)
+    {
+        bool hasRtt = h.Sent > h.Lost;
+
+        // ── HOST column ───────────────────────────────────────────────────────
+        WriteHostColumn(w, hopIndex, in h);
+        w.Write(ColSep);
+
+        // ── Loss% ─────────────────────────────────────────────────────────────
+        double loss = h.LossPercent;
+        FormatF1(loss, numBuf, out int lossLen);
+        if (loss >= 10.0) w.Red();
+        else if (loss > 0.0) w.Yellow();
+        w.WriteFixed(numBuf[..lossLen], W_Loss, rightAlign: true);
+        if (loss > 0.0) w.Reset();
+        w.Write(ColSep);
+
+        // ── Snt ───────────────────────────────────────────────────────────────
+        FormatInt(h.Sent, numBuf, out int sntLen);
+        w.WriteFixed(numBuf[..sntLen], W_Snt, rightAlign: true);
+        w.Write(ColSep);
+
+        // ── RTT columns ───────────────────────────────────────────────────────
+        WriteRttColumn(w, hasRtt ? h.Last                                        : double.NaN, numBuf);
+        w.Write(ColSep);
+        WriteRttColumn(w, hasRtt ? h.Average                                     : double.NaN, numBuf);
+        w.Write(ColSep);
+        WriteRttColumn(w, hasRtt && h.Best  < double.MaxValue ? h.Best  : double.NaN, numBuf);
+        w.Write(ColSep);
+        WriteRttColumn(w, hasRtt && h.Worst > double.MinValue ? h.Worst : double.NaN, numBuf);
+        w.Write(ColSep);
+        WriteRttColumn(w, hasRtt ? h.StdDev                                      : double.NaN, numBuf);
+        w.Write(ColSep);
+        WriteRttColumn(w, !double.IsNaN(h.Jitter) ? h.Jitter : double.NaN, numBuf);
+
+        // ── ASN column ────────────────────────────────────────────────────────
+        if (_options.EnableAsn)
         {
-            return _hopLabelCache[hopIndex]!;
+            w.Write(ColSep);
+            string asnDisplay = !h.AsnResolved ? "..." : h.Asn?.ToString() ?? "???";
+            w.Grey();
+            w.WriteFixed(asnDisplay.AsSpan(), W_Asn);
+            w.Reset();
         }
 
-        string label = BuildHopLabel(_ttlPrefixes[hopIndex], currentAddress, currentHostName);
-
-        _hopLabelCache[hopIndex]    = label;
-        _hopLastAddress[hopIndex]   = currentAddress;
-        _hopLastHostName[hopIndex]  = currentHostName;
-
-        return label;
+        w.NewLine();
     }
 
-    private static string BuildHopLabel(string prefix, string? ip, string? hostName)
+    private void WriteHostColumn(AnsiWriter w, int hopIndex, in HopStats h)
     {
+        string prefix  = _ttlPrefixes[hopIndex];
+        string? ip     = h.Address?.ToString();
+        string? hn     = h.HostName;
+
         if (ip is null)
-            return $"{prefix} [grey]???[/]";
-
-        // Show hostname if resolved (and different from the IP string).
-        if (hostName is { Length: > 0 } hn &&
-            !string.Equals(hn, ip, StringComparison.Ordinal))
         {
-            // Ensure the full label fits within the HOST column width (40 chars).
-            // Display layout: "{prefix} {hn} ({ip})"
-            // Fixed overhead: prefix.Length + 1 (space) + 2 (" (") + ip.Length + 1 (")")
-            int overhead = prefix.Length + 1 + 2 + ip.Length + 1;
-            int maxHnLen = ColHostWidth - overhead;
-
-            if (maxHnLen <= 0)
-            {
-                // IP alone with truncated suffix — extremely narrow edge case
-                return $"{prefix} {ip}";
-            }
-
-            if (hn.Length > maxHnLen)
-                hn = string.Concat(hn.AsSpan(0, maxHnLen - 1), "…");
-
-            return $"{prefix} {EscapeMarkup(hn)} [grey]({ip})[/]";
+            w.Grey();
+            w.WriteFixed($"{prefix} ???".AsSpan(), W_Host);
+            w.Reset();
+            return;
         }
 
-        // DNS in-flight: show IP; once resolved, the hostname replaces it.
-        return $"{prefix} {ip}";
+        // Show "prefix hostname (ip)" if hostname differs from IP.
+        if (hn is { Length: > 0 } && !string.Equals(hn, ip, StringComparison.Ordinal))
+        {
+            int overhead  = prefix.Length + 1 + 2 + ip.Length + 1; // " prefix hn (ip)"
+            int maxHnLen  = W_Host - overhead;
+            ReadOnlySpan<char> hnSpan = maxHnLen > 0 && hn.Length > maxHnLen
+                ? hn.AsSpan(0, maxHnLen)
+                : hn.AsSpan();
+
+            // Write prefix + " " + hostname, then " (" + ip + ")" in grey — padded to W_Host total.
+            string full = maxHnLen > 0 && hn.Length > maxHnLen
+                ? $"{prefix} {hn[..maxHnLen]}({ip})"
+                : $"{prefix} {hn} ({ip})";
+            w.WriteFixed(full.AsSpan(), W_Host);
+        }
+        else
+        {
+            w.WriteFixed($"{prefix} {ip}".AsSpan(), W_Host);
+        }
     }
 
-    // ── formatting helpers (stack-char, no heap) ──────────────────────────────
-
-    private static string FormatMs(double ms, Span<char> buf)
+    private static void WriteRttColumn(AnsiWriter w, double ms, Span<char> buf)
     {
-        // Format as "NNN.N" (one decimal place, max 5 significant chars + unit).
-        if (ms.TryFormat(buf, out int written, "F1"))
-            return new string(buf[..written]);
-        return ms.ToString("F1");
+        if (double.IsNaN(ms))
+        {
+            w.Grey();
+            w.WriteFixed("???".AsSpan(), W_Rtt, rightAlign: true);
+            w.Reset();
+        }
+        else
+        {
+            FormatF1(ms, buf, out int len);
+            w.WriteFixed(buf[..len], W_Rtt, rightAlign: true);
+        }
     }
 
-    private static string FormatPercent(double pct, Span<char> buf)
+    private static void FormatF1(double value, Span<char> buf, out int len)
     {
-        if (pct.TryFormat(buf, out int written, "F1"))
-            return new string(buf[..written]);
-        return pct.ToString("F1");
+        if (!value.TryFormat(buf, out len, "F1"))
+            len = 0;
     }
 
-    private static string FormatInt(int value, Span<char> buf)
+    private static void FormatInt(int value, Span<char> buf, out int len)
     {
-        if (value.TryFormat(buf, out int written))
-            return new string(buf[..written]);
-        return value.ToString();
+        if (!value.TryFormat(buf, out len))
+            len = 0;
     }
 
-    /// <summary>Escapes Spectre.Console markup characters in arbitrary strings (hostnames).</summary>
-    private static string EscapeMarkup(string s) => s
-        .Replace("[", "[[", StringComparison.Ordinal)
-        .Replace("]", "]]", StringComparison.Ordinal);
+    // ── pre-encode title + header ─────────────────────────────────────────────
+
+    private static byte[] EncodeTitleLine(string titleHost)
+    {
+        using var w = new AnsiWriter(512);
+        w.Bold();
+        w.Write("mtrcs");
+        w.Reset();
+        w.Write("  ");
+        w.Cyan();
+        w.Write(titleHost);
+        w.Reset();
+        return w.ToArray();
+    }
+
+    private static byte[] EncodeHeaderLine(bool showAsn)
+    {
+        using var w = new AnsiWriter(256);
+        w.Bold();
+        w.WriteFixed("HOST".AsSpan(),   W_Host);
+        w.Write(ColSep);
+        w.WriteFixed("Loss%".AsSpan(),  W_Loss,  rightAlign: true);
+        w.Write(ColSep);
+        w.WriteFixed("Snt".AsSpan(),    W_Snt,   rightAlign: true);
+        w.Write(ColSep);
+        w.WriteFixed("Last".AsSpan(),   W_Rtt,   rightAlign: true);
+        w.Write(ColSep);
+        w.WriteFixed("Avg".AsSpan(),    W_Rtt,   rightAlign: true);
+        w.Write(ColSep);
+        w.WriteFixed("Best".AsSpan(),   W_Rtt,   rightAlign: true);
+        w.Write(ColSep);
+        w.WriteFixed("Wrst".AsSpan(),   W_Rtt,   rightAlign: true);
+        w.Write(ColSep);
+        w.WriteFixed("StDev".AsSpan(),  W_Rtt,   rightAlign: true);
+        w.Write(ColSep);
+        w.WriteFixed("Jitter".AsSpan(), W_Rtt,   rightAlign: true);
+        if (showAsn)
+        {
+            w.Write(ColSep);
+            w.WriteFixed("ASN".AsSpan(), W_Asn);
+        }
+        w.Reset();
+        return w.ToArray();
+    }
 }

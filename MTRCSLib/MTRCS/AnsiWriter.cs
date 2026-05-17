@@ -11,7 +11,7 @@ namespace MTRCS;
 /// All methods write directly into the internal buffer via <see cref="Encoding.UTF8"/>
 /// or manual ASCII encoding — no intermediate strings are created on the hot path.
 /// </summary>
-internal sealed class AnsiWriter
+internal sealed class AnsiWriter : IDisposable
 {
     // ANSI/VT escape sequence prefix byte.
     private const byte Esc = 0x1B;
@@ -157,4 +157,18 @@ internal sealed class AnsiWriter
             throw new InvalidOperationException(
                 $"AnsiWriter frame buffer overflow: needed {_pos + needed} bytes, capacity {_buffer.Length}.");
     }
+
+    /// <summary>
+    /// Returns a trimmed copy of the accumulated bytes — used to pre-encode constant sequences.
+    /// Resets the write position after copying.
+    /// </summary>
+    internal byte[] ToArray()
+    {
+        byte[] result = _buffer[.._pos].ToArray();
+        _pos = 0;
+        return result;
+    }
+
+    /// <inheritdoc/>
+    public void Dispose() => _stdout.Dispose();
 }

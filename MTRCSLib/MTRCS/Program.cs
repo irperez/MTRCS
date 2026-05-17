@@ -1,11 +1,11 @@
-﻿using Spectre.Console.Cli;
+﻿using MTRCS;
 
-var app = new CommandApp<MTRCS.MtrCommand>();
-app.Configure(config =>
+var result = CliParser.Parse(args);
+
+if (result.ShouldExit)
 {
-    config.SetApplicationName("mtrcs");
-    config.SetApplicationVersion("1.0.0");
-    config.AddExample("example.com");
-    config.AddExample("8.8.8.8", "--max-hops", "20", "--interval", "500");
-});
-return await app.RunAsync(args);
+    Console.WriteLine(result.Message);
+    return result.ExitCode;
+}
+
+return await new MTRCS.MtrCommand().RunAsync(result.Settings!, CancellationToken.None);

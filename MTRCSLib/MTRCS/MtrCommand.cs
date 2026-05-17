@@ -1,119 +1,82 @@
-using System.ComponentModel;
-using System.Net;
 using MTRCSLib;
 using MTRCSLib.Abstractions;
-using Spectre.Console;
-using Spectre.Console.Cli;
 
 namespace MTRCS;
 
 /// <summary>
-/// Spectre.Console.Cli async command that runs a continuous MTR-style traceroute
-/// and renders live statistics to the terminal.
+/// Core MTR command: resolves the target, starts a <see cref="TracerouteSession"/>,
+/// and runs either live mode (continuous rendering) or report mode (fixed cycles + exit).
+/// AOT-safe: no reflection, no dynamic code.
 /// </summary>
-internal sealed class MtrCommand : AsyncCommand<MtrCommand.Settings>
+internal sealed class MtrCommand
 {
-    /// <summary>CLI settings / arguments for the mtr command.</summary>
-    internal sealed class Settings : CommandSettings
+    /// <summary>Parsed and validated CLI settings.</summary>
+    internal sealed class Settings(
+        string host,
+        int maxHops,
+        int intervalMs,
+        int timeoutMs,
+        int payloadBytes,
+        bool report,
+        int reportCycles,
+        bool showAsn,
+        bool useTcp,
+        bool useUdp,
+        int port,
+        string? outputPath,
+        string outputFormat)
     {
-        [Description("Hostname or IPv4 address to trace.")]
-        [CommandArgument(0, "<host>")]
-        public string Host { get; init; } = string.Empty;
+        internal string  Host         { get; } = host;
+        internal int     MaxHops      { get; } = maxHops;
+        internal int     IntervalMs   { get; } = intervalMs;
+        internal int     TimeoutMs    { get; } = timeoutMs;
+        internal int     PayloadBytes { get; } = payloadBytes;
+        internal bool    Report       { get; } = report;
+        internal int     ReportCycles { get; } = reportCycles;
+        internal bool    ShowAsn      { get; } = showAsn;
+        internal bool    UseTcp       { get; } = useTcp;
+        internal bool    UseUdp       { get; } = useUdp;
+        internal int     Port         { get; } = port;
+        internal string? OutputPath   { get; } = outputPath;
+        internal string  OutputFormat { get; } = outputFormat;
 
-        [Description("Maximum number of TTL hops (1–30). Default: 30")]
-        [CommandOption("-m|--max-hops")]
-        [DefaultValue(TracerouteOptions.DefaultMaxHops)]
-        public int MaxHops { get; init; } = TracerouteOptions.DefaultMaxHops;
-
-        [Description("Probe cycle interval in milliseconds. Default: 1000")]
-        [CommandOption("-i|--interval")]
-        [DefaultValue(TracerouteOptions.DefaultIntervalMs)]
-        public int IntervalMs { get; init; } = TracerouteOptions.DefaultIntervalMs;
-
-        [Description("Per-probe timeout in milliseconds. Default: 800")]
-        [CommandOption("-t|--timeout")]
-        [DefaultValue(TracerouteOptions.DefaultTimeoutMs)]
-        public int TimeoutMs { get; init; } = TracerouteOptions.DefaultTimeoutMs;
-
-        [Description("ICMP payload size in bytes. Default: 28")]
-        [CommandOption("-s|--size")]
-        [DefaultValue(TracerouteOptions.DefaultPayloadBytes)]
-        public int PayloadBytes { get; init; } = TracerouteOptions.DefaultPayloadBytes;
-
-        [Description("Report mode: run one cycle, print results, and exit.")]
-        [CommandOption("-r|--report")]
-        [DefaultValue(false)]
-        public bool Report { get; init; }
-
-        [Description("Number of cycles to run in report mode. Default: 10")]
-        [CommandOption("-c|--cycles")]
-        [DefaultValue(10)]
-        public int ReportCycles { get; init; } = 10;
-
-        [Description("Show ASN (Autonomous System Number) column via Team Cymru DNS lookup.")]
-        [CommandOption("-a|--asn")]
-        [DefaultValue(false)]
-        public bool ShowAsn { get; init; }
-
-        [Description("Use TCP SYN probes instead of ICMP (bypasses ICMP firewalls).")]
-        [CommandOption("-T|--tcp")]
-        [DefaultValue(false)]
-        public bool UseTcp { get; init; }
-
-        [Description("Use UDP probes instead of ICMP (bypasses ICMP firewalls).")]
-        [CommandOption("-u|--udp")]
-        [DefaultValue(false)]
-        public bool UseUdp { get; init; }
-
-        [Description("Destination port for TCP/UDP probes. Default: 80 for TCP, 33434 for UDP.")]
-        [CommandOption("-P|--port")]
-        [DefaultValue(0)]
-        public int Port { get; init; }
-
-        [Description("Output file path for report export (requires --report).")]
-        [CommandOption("-o|--output")]
-        public string? OutputPath { get; init; }
-
-        [Description("Export format: text, csv, json. Default: text")]
-        [CommandOption("-f|--format")]
-        [DefaultValue("text")]
-        public string OutputFormat { get; init; } = "text";
-
-        public override ValidationResult Validate()
+        /// <summary>Returns <see langword="null"/> if valid; otherwise an error message.</summary>
+        internal string? Validate()
         {
             if (string.IsNullOrWhiteSpace(Host))
-                return ValidationResult.Error("Host must not be empty.");
+                return "Host must not be empty.";
             if (MaxHops is < 1 or > 255)
-                return ValidationResult.Error("--max-hops must be between 1 and 255.");
+                return "--max-hops must be between 1 and 255.";
             if (IntervalMs < 1)
-                return ValidationResult.Error("--interval must be positive.");
+                return "--interval must be positive.";
             if (TimeoutMs < 1)
-                return ValidationResult.Error("--timeout must be positive.");
+                return "--timeout must be positive.";
             if (PayloadBytes < 0)
-                return ValidationResult.Error("--size must be non-negative.");
+                return "--size must be non-negative.";
             if (ReportCycles < 1)
-                return ValidationResult.Error("--cycles must be at least 1.");
+                return "--cycles must be at least 1.";
             if (UseTcp && UseUdp)
-                return ValidationResult.Error("--tcp and --udp are mutually exclusive.");
+                return "--tcp and --udp are mutually exclusive.";
             if (Port is < 0 or > 65535)
-                return ValidationResult.Error("--port must be between 0 and 65535.");
+                return "--port must be between 0 and 65535.";
             if (OutputPath is not null && !Report)
-                return ValidationResult.Error("--output requires --report mode.");
+                return "--output requires --report mode.";
             if (OutputFormat is not ("text" or "csv" or "json"))
-                return ValidationResult.Error("--format must be one of: text, csv, json.");
-            return ValidationResult.Success();
+                return "--format must be one of: text, csv, json.";
+            return null;
         }
     }
 
-    protected override async Task<int> ExecuteAsync(CommandContext context, Settings settings, CancellationToken cancellationToken)
+    internal async Task<int> RunAsync(Settings settings, CancellationToken cancellationToken)
     {
         ConsoleInit.EnableVirtualTerminal();
 
-        // Resolve host → TracerouteOptions
         TracerouteOptions options;
         try
         {
-            AnsiConsole.MarkupLine($"[grey]Resolving[/] [bold]{settings.Host}[/][grey]...[/]");
+            Console.Error.Write("Resolving ");
+            Console.Error.Write(settings.Host);
+            Console.Error.WriteLine("...");
             ProbeMode mode = settings.UseTcp ? ProbeMode.Tcp
                            : settings.UseUdp ? ProbeMode.Udp
                            : ProbeMode.Icmp;
@@ -130,11 +93,11 @@ internal sealed class MtrCommand : AsyncCommand<MtrCommand.Settings>
         }
         catch (Exception ex)
         {
-            AnsiConsole.MarkupLine($"[red]Error:[/] {ex.Message}");
+            Console.Error.Write("Error: ");
+            Console.Error.WriteLine(ex.Message);
             return 1;
         }
 
-        // Wire up Ctrl+C → cancellation (also linked to the CLI-provided token)
         using CancellationTokenSource cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         Console.CancelKeyPress += (_, e) =>
         {
@@ -158,7 +121,6 @@ internal sealed class MtrCommand : AsyncCommand<MtrCommand.Settings>
         IAsnResolver? asnResolver = settings.ShowAsn ? new CymruAsnResolver() : null;
 
         await using TracerouteSession session = new(options, pingerFactory, dnsResolver, asnResolver);
-
         await session.StartAsync(cts.Token).ConfigureAwait(false);
 
         if (settings.Report)
@@ -215,7 +177,9 @@ internal sealed class MtrCommand : AsyncCommand<MtrCommand.Settings>
     {
         var renderer = new MtrRenderer(options);
 
-        AnsiConsole.MarkupLine($"[grey]Running {settings.ReportCycles} cycle(s) — please wait...[/]");
+        Console.Error.Write("Running ");
+        Console.Error.Write(settings.ReportCycles);
+        Console.Error.WriteLine(" cycle(s) — please wait...");
 
         // Wait for the requested number of cycles (approximated by interval × cycles).
         long targetMs = (long)settings.ReportCycles * options.IntervalMs;
@@ -227,15 +191,16 @@ internal sealed class MtrCommand : AsyncCommand<MtrCommand.Settings>
 
         await session.StopAsync().ConfigureAwait(false);
 
-        // Always print the table to the terminal.
-        AnsiConsole.Write(renderer.Refresh(session));
+        // Print the report table to stdout.
+        renderer.Render(session);
 
         // Optionally export to file.
         if (settings.OutputPath is { Length: > 0 } outputPath)
         {
             var exporter = new ReportExporter(options);
             await exporter.ExportAsync(session, outputPath, settings.OutputFormat, ct).ConfigureAwait(false);
-            AnsiConsole.MarkupLine($"[grey]Report saved to:[/] [bold]{outputPath}[/]");
+            Console.Error.Write("Report saved to: ");
+            Console.Error.WriteLine(outputPath);
         }
 
         return 0;
