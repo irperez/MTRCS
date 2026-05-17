@@ -131,7 +131,7 @@ public sealed class TracerouteSession : ITracerouteSession
             await RunOneCycleAsync(ct).ConfigureAwait(false);
 
             long elapsed = Environment.TickCount64 - cycleStart;
-            int delay = Options.IntervalMs - (int)Math.Min(elapsed, Options.IntervalMs);
+            int delay = (int)Math.Max(0L, Options.IntervalMs - elapsed);
 
             if (delay > 0)
             {

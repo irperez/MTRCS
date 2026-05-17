@@ -70,6 +70,8 @@ internal sealed class MtrCommand : AsyncCommand<MtrCommand.Settings>
 
     protected override async Task<int> ExecuteAsync(CommandContext context, Settings settings, CancellationToken cancellationToken)
     {
+        ConsoleInit.EnableVirtualTerminal();
+
         // Resolve host → TracerouteOptions
         TracerouteOptions options;
         try
@@ -116,33 +118,33 @@ internal sealed class MtrCommand : AsyncCommand<MtrCommand.Settings>
         TracerouteOptions options,
         CancellationToken ct)
     {
-        var renderer = new MtrRenderer(options);
+        var renderer = new MtrAnsiRenderer(options);
+        renderer.BeginLive();
 
-        await AnsiConsole.Live(renderer.BuildTable())
-            .AutoClear(false)
-            .Overflow(VerticalOverflow.Ellipsis)
-            .Cropping(VerticalOverflowCropping.Bottom)
-            .StartAsync(async ctx =>
+        try
+        {
+            while (!ct.IsCancellationRequested)
             {
-                while (!ct.IsCancellationRequested)
+                renderer.RenderFrame(session);
+
+                try
                 {
-                    Table table = renderer.Refresh(session);
-                    ctx.UpdateTarget(table);
-
-                    try
-                    {
-                        // Refresh at ~10 Hz so the UI stays snappy without burning CPU.
-                        await Task.Delay(100, ct).ConfigureAwait(false);
-                    }
-                    catch (OperationCanceledException)
-                    {
-                        break;
-                    }
+                    // Refresh at ~10 Hz so the UI stays snappy without burning CPU.
+                    await Task.Delay(100, ct).ConfigureAwait(false);
                 }
+                catch (OperationCanceledException)
+                {
+                    break;
+                }
+            }
 
-                // Final render after cancellation
-                ctx.UpdateTarget(renderer.Refresh(session));
-            }).ConfigureAwait(false);
+            // Final render after cancellation.
+            renderer.RenderFrame(session);
+        }
+        finally
+        {
+            renderer.EndLive();
+        }
 
         await session.StopAsync().ConfigureAwait(false);
         return 0;

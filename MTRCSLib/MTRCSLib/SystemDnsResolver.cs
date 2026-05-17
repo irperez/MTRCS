@@ -18,16 +18,15 @@ public sealed class SystemDnsResolver : IDnsResolver
 
         try
         {
+            string addressStr = address.ToString();
             IPHostEntry entry = await Dns
-                .GetHostEntryAsync(address.ToString(), AddressFamily.InterNetwork, cancellationToken)
+                .GetHostEntryAsync(addressStr, AddressFamily.InterNetwork, cancellationToken)
                 .ConfigureAwait(false);
 
-            string hostName = entry.HostName;
-
             // If the resolver just echoed back the IP string, treat it as unresolved.
-            return string.Equals(hostName, address.ToString(), StringComparison.Ordinal)
+            return string.Equals(entry.HostName, addressStr, StringComparison.Ordinal)
                 ? null
-                : hostName;
+                : entry.HostName;
         }
         catch (OperationCanceledException)
         {

@@ -12,7 +12,7 @@ namespace MTRCSLib;
 public struct HopStats
 {
     /// <summary>Number of recent RTT samples kept for jitter/sparkline display.</summary>
-    public const int RingBufferSize = 200;
+    public const int RingBufferSize = 64;
 
     // ── identity ──────────────────────────────────────────────────────────────
     private IPAddress? _address;

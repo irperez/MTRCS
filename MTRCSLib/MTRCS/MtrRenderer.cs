@@ -15,7 +15,8 @@ namespace MTRCS;
 ///     <item>A single <see cref="HopStats"/> stack-span is reused each refresh cycle.</item>
 ///     <item>Numeric formatting uses <c>TryFormat</c> into stack-allocated <see cref="Span{T}"/>.</item>
 ///     <item>The <see cref="Table"/> object is rebuilt each frame (Spectre requires it for live
-///           updates) but column and row objects reuse string literals where possible.</item>
+///           updates) but the <see cref="TableTitle"/>, <see cref="TableColumn"/> objects, TTL
+///           prefix strings, and per-hop label markup are all pre-computed and reused.</item>
 ///   </list>
 /// </summary>
 internal sealed class MtrRenderer
@@ -36,10 +37,71 @@ internal sealed class MtrRenderer
     // Reused snapshot buffer — avoids per-refresh heap allocation for the hop array.
     private readonly HopStats[] _snapBuffer;
 
+    // ── per-session cached objects (computed once in constructor) ─────────────
+
+    /// <summary>Title markup built once from the resolved target; reused every frame.</summary>
+    private readonly TableTitle _tableTitle;
+
+    /// <summary>Column descriptors built once; reused every frame.</summary>
+    private readonly TableColumn[] _columns;
+
+    /// <summary>
+    /// TTL prefix strings, e.g. _ttlPrefixes[0] == " 1." for hop 1 (1-based TTL, 0-based index).
+    /// Pre-computed to avoid per-frame int.ToString() + interpolation.
+    /// </summary>
+    private readonly string[] _ttlPrefixes;
+
+    // ── per-hop label cache ───────────────────────────────────────────────────
+
+    /// <summary>
+    /// Cached rendered HOST-column markup per hop slot.
+    /// Invalidated when the hop's address or hostname changes.
+    /// </summary>
+    private readonly string?[] _hopLabelCache;
+
+    /// <summary>Last address string seen for each hop slot (used to detect changes).</summary>
+    private readonly string?[] _hopLastAddress;
+
+    /// <summary>Last hostname seen for each hop slot (used to detect changes).</summary>
+    private readonly string?[] _hopLastHostName;
+
     internal MtrRenderer(TracerouteOptions options)
     {
         _options = options;
         _snapBuffer = new HopStats[options.MaxHops];
+
+        // Pre-compute table title (once per session).
+        string targetIp = options.Target.ToString();
+        string titleHost = options.Host.Equals(targetIp, StringComparison.Ordinal)
+            ? options.Host
+            : $"{options.Host} ({targetIp})";
+        _tableTitle = new TableTitle($"[bold]mtrcs[/]  [cyan]{titleHost}[/]  [grey]Keys: q=quit[/]");
+
+        // Pre-compute column descriptors (Spectre doesn't mutate them after AddColumn).
+        _columns =
+        [
+            new TableColumn("[bold]HOST[/]").LeftAligned().Width(40),
+            new TableColumn("[bold]Loss%[/]").RightAligned().Width(7),
+            new TableColumn("[bold]Snt[/]").RightAligned().Width(5),
+            new TableColumn("[bold]Last[/]").RightAligned().Width(7),
+            new TableColumn("[bold]Avg[/]").RightAligned().Width(7),
+            new TableColumn("[bold]Best[/]").RightAligned().Width(7),
+            new TableColumn("[bold]Wrst[/]").RightAligned().Width(7),
+            new TableColumn("[bold]StDev[/]").RightAligned().Width(7),
+        ];
+
+        // Pre-compute TTL prefix strings " 1." … "NN." for every possible hop slot.
+        _ttlPrefixes = new string[options.MaxHops];
+        for (int i = 0; i < options.MaxHops; i++)
+        {
+            int ttl = i + 1;
+            _ttlPrefixes[i] = ttl < 10 ? $" {ttl}." : $"{ttl}.";
+        }
+
+        // Allocate per-hop label cache.
+        _hopLabelCache    = new string?[options.MaxHops];
+        _hopLastAddress   = new string?[options.MaxHops];
+        _hopLastHostName  = new string?[options.MaxHops];
     }
 
     /// <summary>Returns an empty table with columns — used as the initial live target.</summary>
@@ -64,22 +126,11 @@ internal sealed class MtrRenderer
         table.Expand();
         table.ShowHeaders();
 
-        // Header: show target name + IP similar to MTR's banner.
-        string title = _options.Host.Equals(_options.Target.ToString(), StringComparison.Ordinal)
-            ? _options.Host
-            : $"{_options.Host} ({_options.Target})";
-
-        table.Title = new TableTitle($"[bold]mtrcs[/]  [cyan]{title}[/]  [grey]Keys: q=quit[/]");
-
-        // Columns
-        table.AddColumn(new TableColumn("[bold]HOST[/]").LeftAligned().Width(40));
-        table.AddColumn(new TableColumn("[bold]Loss%[/]").RightAligned().Width(7));
-        table.AddColumn(new TableColumn("[bold]Snt[/]").RightAligned().Width(5));
-        table.AddColumn(new TableColumn("[bold]Last[/]").RightAligned().Width(7));
-        table.AddColumn(new TableColumn("[bold]Avg[/]").RightAligned().Width(7));
-        table.AddColumn(new TableColumn("[bold]Best[/]").RightAligned().Width(7));
-        table.AddColumn(new TableColumn("[bold]Wrst[/]").RightAligned().Width(7));
-        table.AddColumn(new TableColumn("[bold]StDev[/]").RightAligned().Width(7));
+        // Reuse the pre-computed title and column objects — avoids string interpolation
+        // and Spectre markup parsing on every 10 Hz frame.
+        table.Title = _tableTitle;
+        foreach (TableColumn col in _columns)
+            table.AddColumn(col);
 
         if (hopCount == 0)
         {
@@ -94,7 +145,7 @@ internal sealed class MtrRenderer
             ref readonly HopStats h = ref hops[i];
 
             // ── HOST column ──────────────────────────────────────────────────
-            string hopLabel = BuildHopLabel(i + 1, in h);
+            string hopLabel = GetOrBuildHopLabel(i, in h);
 
             // ── Loss% ────────────────────────────────────────────────────────
             string loss = FormatPercent(h.LossPercent, numBuf);
@@ -122,19 +173,39 @@ internal sealed class MtrRenderer
         return table;
     }
 
-    private static string BuildHopLabel(int ttl, in HopStats h)
+    /// <summary>
+    /// Returns the HOST-column markup for hop slot <paramref name="hopIndex"/>, rebuilding it
+    /// only when the hop's address or hostname has changed since the last frame.
+    /// </summary>
+    private string GetOrBuildHopLabel(int hopIndex, in HopStats h)
     {
-        // TTL number is 1-padded to 3 chars like MTR: " 1. host"
-        string number = ttl.ToString();
-        string prefix = ttl < 10 ? $" {number}." : $"{number}.";
+        string? currentAddress  = h.Address?.ToString();
+        string? currentHostName = h.HostName;
 
-        if (h.Address is null)
+        // Return the cached label if nothing has changed.
+        if (_hopLabelCache[hopIndex] is not null &&
+            currentAddress  == _hopLastAddress[hopIndex] &&
+            currentHostName == _hopLastHostName[hopIndex])
+        {
+            return _hopLabelCache[hopIndex]!;
+        }
+
+        string label = BuildHopLabel(_ttlPrefixes[hopIndex], currentAddress, currentHostName);
+
+        _hopLabelCache[hopIndex]    = label;
+        _hopLastAddress[hopIndex]   = currentAddress;
+        _hopLastHostName[hopIndex]  = currentHostName;
+
+        return label;
+    }
+
+    private static string BuildHopLabel(string prefix, string? ip, string? hostName)
+    {
+        if (ip is null)
             return $"{prefix} [grey]???[/]";
 
-        string ip = h.Address.ToString();
-
         // Show hostname if resolved (and different from the IP string).
-        if (h.HostName is { Length: > 0 } hn &&
+        if (hostName is { Length: > 0 } hn &&
             !string.Equals(hn, ip, StringComparison.Ordinal))
         {
             // Ensure the full label fits within the HOST column width (40 chars).
