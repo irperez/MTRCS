@@ -5,6 +5,8 @@ on:
     tags:
       - "v[0-9]+.[0-9]+.[0-9]+"
       - "v[0-9]+.[0-9]+.[0-9]+-*"
+    branches:
+      - main       # automatic pre-release on every push to main
   workflow_dispatch:
     inputs:
       version:
@@ -73,15 +75,18 @@ jobs:
         with:
           dotnet-version: "10.0.x"
 
-      # Determine release version from tag or manual input
+      # Determine release version from tag, branch push, or manual input
       - name: Resolve version
         id: version
         shell: bash
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             VERSION="${{ github.event.inputs.version }}"
+          elif [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"   # strip leading 'v' from tag
           else
-            VERSION="${GITHUB_REF_NAME#v}"   # strip leading 'v'
+            # Auto pre-release version for push to main: 0.YYYYMMDD.<run_number>-pre
+            VERSION="0.$(date -u +%Y%m%d).${{ github.run_number }}-pre"
           fi
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "tag=v${VERSION}"    >> "$GITHUB_OUTPUT"
@@ -159,6 +164,9 @@ jobs:
   release:
     name: Create GitHub Release
     needs: build
+    # Run even if some build jobs failed so partial artifacts are still released;
+    # skip only if the entire build matrix was cancelled.
+    if: ${{ always() && !cancelled() && !contains(needs.build.result, 'cancelled') }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -173,8 +181,10 @@ jobs:
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             VERSION="${{ github.event.inputs.version }}"
-          else
+          elif [[ "$GITHUB_REF" == refs/tags/* ]]; then
             VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION="0.$(date -u +%Y%m%d).${{ github.run_number }}-pre"
           fi
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "tag=v${VERSION}"    >> "$GITHUB_OUTPUT"
@@ -244,5 +254,6 @@ jobs:
           draft: false
           prerelease: ${{ contains(steps.version.outputs.version, '-') }}
           files: dist/*
+          fail_on_unmatched_files: false
           generate_release_notes: false
-          make_latest: true
+          make_latest: ${{ !contains(steps.version.outputs.version, '-') }}
