@@ -46,6 +46,16 @@ public struct HopStats
     /// <summary>Running standard deviation of RTT in ms (Welford).</summary>
     public double StdDev => NetworkUtils.StdDevFromVariance(_m2 / (_successCount > 1 ? _successCount - 1 : 1));
 
+    // ── Jitter ────────────────────────────────────────────────────────────────
+    private double _prevRtt;   // previous successful RTT (for jitter delta)
+    private bool _hasPrevRtt;
+
+    /// <summary>
+    /// Absolute difference between the last two successful RTT samples (|last − prev|).
+    /// Returns <see cref="double.NaN"/> until at least two replies have been received.
+    /// </summary>
+    public double Jitter { get; private set; } = double.NaN;
+
     // ── Welford internals ─────────────────────────────────────────────────────
     private int _successCount; // probes with a valid RTT
     private double _m2;        // sum of squared deviations (for Welford)
@@ -63,6 +73,15 @@ public struct HopStats
 
     /// <summary>Reverse-DNS hostname for this hop, populated asynchronously.</summary>
     public string? HostName => _hostName;
+
+    // ── ASN ───────────────────────────────────────────────────────────────────
+    private AsnInfo? _asn;
+
+    /// <summary>ASN information for this hop, populated asynchronously when <c>--asn</c> is enabled.</summary>
+    public AsnInfo? Asn => _asn;
+
+    /// <summary>True once ASN resolution has been attempted (success or failure).</summary>
+    public bool AsnResolved { get; private set; }
 
     // ── internal flags ────────────────────────────────────────────────────────
 
@@ -104,6 +123,12 @@ public struct HopStats
         if (rttMs < Best) Best = rttMs;
         if (rttMs > Worst) Worst = rttMs;
 
+        // Jitter: |last - prev|
+        if (_hasPrevRtt)
+            Jitter = Math.Abs(rttMs - _prevRtt);
+        _prevRtt = rttMs;
+        _hasPrevRtt = true;
+
         // Welford's online algorithm
         _successCount++;
         double delta = rttMs - Average;
@@ -136,6 +161,15 @@ public struct HopStats
     }
 
     /// <summary>
+    /// Sets the resolved ASN info.  Safe to call from any thread once per hop.
+    /// </summary>
+    public void SetAsn(AsnInfo? asn)
+    {
+        _asn = asn;
+        AsnResolved = true;
+    }
+
+    /// <summary>
     /// Resets all statistics to their initial state while keeping the ring buffer allocation.
     /// </summary>
     public void Reset()
@@ -153,6 +187,11 @@ public struct HopStats
         _ringCount = 0;
         _hostName = null;
         DnsResolved = false;
+        Jitter = double.NaN;
+        _prevRtt = 0;
+        _hasPrevRtt = false;
+        _asn = null;
+        AsnResolved = false;
     }
 
     /// <summary>

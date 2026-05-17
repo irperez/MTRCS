@@ -22,16 +22,18 @@ namespace MTRCS;
 internal sealed class MtrRenderer
 {
     // Column indices (keep in sync with BuildTable column order)
-    private const int ColHost = 0;
-    private const int ColLoss = 1;
+    private const int ColHost  = 0;
+    private const int ColLoss  = 1;
     // Must match the Width() passed to the HOST TableColumn below.
     private const int ColHostWidth = 40;
-    private const int ColSnt = 2;
-    private const int ColLast = 3;
-    private const int ColAvg = 4;
-    private const int ColBest = 5;
-    private const int ColWrst = 6;
+    private const int ColSnt   = 2;
+    private const int ColLast  = 3;
+    private const int ColAvg   = 4;
+    private const int ColBest  = 5;
+    private const int ColWrst  = 6;
     private const int ColStDev = 7;
+    private const int ColJitter = 8;
+    private const int ColAsn   = 9;
 
     private readonly TracerouteOptions _options;
     // Reused snapshot buffer — avoids per-refresh heap allocation for the hop array.
@@ -43,7 +45,7 @@ internal sealed class MtrRenderer
     private readonly TableTitle _tableTitle;
 
     /// <summary>Column descriptors built once; reused every frame.</summary>
-    private readonly TableColumn[] _columns;
+    private TableColumn[] _columns;
 
     /// <summary>
     /// TTL prefix strings, e.g. _ttlPrefixes[0] == " 1." for hop 1 (1-based TTL, 0-based index).
@@ -88,7 +90,15 @@ internal sealed class MtrRenderer
             new TableColumn("[bold]Best[/]").RightAligned().Width(7),
             new TableColumn("[bold]Wrst[/]").RightAligned().Width(7),
             new TableColumn("[bold]StDev[/]").RightAligned().Width(7),
+            new TableColumn("[bold]Jitter[/]").RightAligned().Width(7),
         ];
+
+        // Conditionally add ASN column.
+        if (options.EnableAsn)
+        {
+            Array.Resize(ref _columns, _columns.Length + 1);
+            _columns[^1] = new TableColumn("[bold]ASN[/]").LeftAligned().Width(22);
+        }
 
         // Pre-compute TTL prefix strings " 1." … "NN." for every possible hop slot.
         _ttlPrefixes = new string[options.MaxHops];
@@ -134,7 +144,11 @@ internal sealed class MtrRenderer
 
         if (hopCount == 0)
         {
-            table.AddRow("[grey]Waiting for first probe cycle...[/]", "", "", "", "", "", "", "");
+            // Fill the waiting row with empty cells for every column after the first.
+            string[] waitingRow = new string[_columns.Length];
+            waitingRow[0] = "[grey]Waiting for first probe cycle...[/]";
+            for (int c = 1; c < waitingRow.Length; c++) waitingRow[c] = "";
+            table.AddRow(waitingRow);
             return table;
         }
 
@@ -165,9 +179,19 @@ internal sealed class MtrRenderer
             string avg = hasRtt ? FormatMs(h.Average, numBuf) : "???";
             string best = hasRtt && h.Best < double.MaxValue ? FormatMs(h.Best, numBuf) : "???";
             string wrst = hasRtt && h.Worst > double.MinValue ? FormatMs(h.Worst, numBuf) : "???";
-            string stdev = hasRtt ? FormatMs(h.StdDev, numBuf) : "???";
+            string stdev  = hasRtt ? FormatMs(h.StdDev, numBuf) : "???";
+            string jitter = !double.IsNaN(h.Jitter) ? FormatMs(h.Jitter, numBuf) : "???";
 
-            table.AddRow(hopLabel, lossMarkup, snt, last, avg, best, wrst, stdev);
+            if (_options.EnableAsn)
+            {
+                string asnDisplay = !h.AsnResolved ? "..." : h.Asn?.ToString() ?? "???";
+                table.AddRow(hopLabel, lossMarkup, snt, last, avg, best, wrst, stdev, jitter,
+                    $"[grey]{EscapeMarkup(asnDisplay)}[/]");
+            }
+            else
+            {
+                table.AddRow(hopLabel, lossMarkup, snt, last, avg, best, wrst, stdev, jitter);
+            }
         }
 
         return table;

@@ -24,6 +24,7 @@ public sealed class TracerouteSession : ITracerouteSession
 {
     private readonly IPingerFactory _pingerFactory;
     private readonly IDnsResolver _dnsResolver;
+    private readonly IAsnResolver? _asnResolver;
     private readonly HopStats[] _hops;       // pre-allocated; index = ttl-1
     private readonly object _statsLock = new();
 
@@ -42,10 +43,12 @@ public sealed class TracerouteSession : ITracerouteSession
     /// <param name="options">Session configuration.</param>
     /// <param name="pingerFactory">Factory used to create one pinger per cycle.</param>
     /// <param name="dnsResolver">Resolver used for PTR lookups.</param>
+    /// <param name="asnResolver">Optional resolver for ASN lookups (used when <see cref="TracerouteOptions.EnableAsn"/> is true).</param>
     public TracerouteSession(
         TracerouteOptions options,
         IPingerFactory pingerFactory,
-        IDnsResolver dnsResolver)
+        IDnsResolver dnsResolver,
+        IAsnResolver? asnResolver = null)
     {
         ArgumentNullException.ThrowIfNull(pingerFactory);
         ArgumentNullException.ThrowIfNull(dnsResolver);
@@ -53,6 +56,7 @@ public sealed class TracerouteSession : ITracerouteSession
         Options = options;
         _pingerFactory = pingerFactory;
         _dnsResolver = dnsResolver;
+        _asnResolver = asnResolver;
 
         // Pre-allocate all hop slots — ring buffers inside HopStats are allocated here too.
         _hops = new HopStats[options.MaxHops];
@@ -179,6 +183,10 @@ public sealed class TracerouteSession : ITracerouteSession
                     // Fire DNS resolution on first sighting of this address.
                     if (!hop.DnsResolved)
                         ScheduleDnsResolution(hopIndex, result.Address!, ct);
+
+                    // Fire ASN resolution on first sighting of this address (if enabled).
+                    if (Options.EnableAsn && _asnResolver is not null && !hop.AsnResolved)
+                        ScheduleAsnResolution(hopIndex, result.Address!, ct);
                 }
                 else
                 {
@@ -216,6 +224,28 @@ public sealed class TracerouteSession : ITracerouteSession
         lock (_statsLock)
         {
             _hops[hopIndex].SetHostName(hostName);
+        }
+    }
+
+    // ── ASN ───────────────────────────────────────────────────────────────────
+
+    private void ScheduleAsnResolution(int hopIndex, IPAddress address, CancellationToken ct)
+    {
+        // Mark immediately so we don't schedule again while resolution is in-flight.
+        _hops[hopIndex].SetAsn(null);
+
+        _ = ResolveAsnAsync(hopIndex, address, ct);
+    }
+
+    private async Task ResolveAsnAsync(int hopIndex, IPAddress address, CancellationToken ct)
+    {
+        AsnInfo? asn = await _asnResolver!
+            .ResolveAsync(address, ct)
+            .ConfigureAwait(false);
+
+        lock (_statsLock)
+        {
+            _hops[hopIndex].SetAsn(asn);
         }
     }
 

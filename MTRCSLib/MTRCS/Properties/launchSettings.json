@@ -2,7 +2,7 @@
   "profiles": {
     "MTRCS": {
       "commandName": "Project",
-      "commandLineArgs": "google.com"
+      "commandLineArgs": "8.8.8.8 --report --output report.json --format json --asn"
     }
   }
 }

@@ -37,13 +37,17 @@ public readonly struct TracerouteOptions
     /// <summary>Number of data bytes appended after the 8-byte ICMP header.</summary>
     public int PayloadBytes { get; }
 
+    /// <summary>When <see langword="true"/>, the session resolves ASN info for each hop via Team Cymru DNS.</summary>
+    public bool EnableAsn { get; }
+
     private TracerouteOptions(
         IPAddress target,
         string host,
         int maxHops,
         int intervalMs,
         int timeoutMs,
-        int payloadBytes)
+        int payloadBytes,
+        bool enableAsn)
     {
         Target = target;
         Host = host;
@@ -51,6 +55,7 @@ public readonly struct TracerouteOptions
         IntervalMs = intervalMs;
         TimeoutMs = timeoutMs;
         PayloadBytes = payloadBytes;
+        EnableAsn = enableAsn;
     }
 
     /// <summary>
@@ -62,7 +67,8 @@ public readonly struct TracerouteOptions
         int maxHops = DefaultMaxHops,
         int intervalMs = DefaultIntervalMs,
         int timeoutMs = DefaultTimeoutMs,
-        int payloadBytes = DefaultPayloadBytes)
+        int payloadBytes = DefaultPayloadBytes,
+        bool enableAsn = false)
     {
         ArgumentNullException.ThrowIfNull(target);
         ArgumentNullException.ThrowIfNull(host);
@@ -78,7 +84,7 @@ public readonly struct TracerouteOptions
         if (payloadBytes < 0)
             throw new ArgumentOutOfRangeException(nameof(payloadBytes), "Must be non-negative.");
 
-        return new TracerouteOptions(target, host, maxHops, intervalMs, timeoutMs, payloadBytes);
+        return new TracerouteOptions(target, host, maxHops, intervalMs, timeoutMs, payloadBytes, enableAsn);
     }
 
     /// <summary>
@@ -92,6 +98,7 @@ public readonly struct TracerouteOptions
         int intervalMs = DefaultIntervalMs,
         int timeoutMs = DefaultTimeoutMs,
         int payloadBytes = DefaultPayloadBytes,
+        bool enableAsn = false,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(host);
@@ -101,7 +108,7 @@ public readonly struct TracerouteOptions
         {
             if (!NetworkUtils.IsIPv4(parsed))
                 throw new ArgumentException("Only IPv4 targets are supported.", nameof(host));
-            return Create(parsed, host, maxHops, intervalMs, timeoutMs, payloadBytes);
+            return Create(parsed, host, maxHops, intervalMs, timeoutMs, payloadBytes, enableAsn);
         }
 
         IPAddress[] addresses = await Dns.GetHostAddressesAsync(host, System.Net.Sockets.AddressFamily.InterNetwork, cancellationToken).ConfigureAwait(false);
@@ -109,6 +116,6 @@ public readonly struct TracerouteOptions
         if (addresses.Length == 0)
             throw new InvalidOperationException($"No IPv4 address found for host '{host}'.");
 
-        return Create(addresses[0], host, maxHops, intervalMs, timeoutMs, payloadBytes);
+        return Create(addresses[0], host, maxHops, intervalMs, timeoutMs, payloadBytes, enableAsn);
     }
 }

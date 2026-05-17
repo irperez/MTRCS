@@ -32,7 +32,8 @@ internal sealed class MtrAnsiRenderer
     private const int W_Host  = 40;
     private const int W_Loss  =  7;
     private const int W_Snt   =  5;
-    private const int W_Rtt   =  7;   // Last / Avg / Best / Wrst / StDev all use this width
+    private const int W_Rtt   =  7;   // Last / Avg / Best / Wrst / StDev / Jitter all use this width
+    private const int W_Asn   = 20;   // ASN column (e.g. "AS15169 GOOGLE")
 
     // Two spaces between every column.
     private const string ColSep = "  ";
@@ -42,6 +43,7 @@ internal sealed class MtrAnsiRenderer
     // Header row bytes, encoded once at construction.
     private readonly byte[] _titleBytes;
     private readonly byte[] _headerBytes;
+    private readonly bool _showAsn;
 
     // ── per-hop caches ────────────────────────────────────────────────────────
 
@@ -82,7 +84,8 @@ internal sealed class MtrAnsiRenderer
             ? options.Host
             : $"{options.Host} ({targetIp})";
         _titleBytes  = EncodeTitleLine(titleHost);
-        _headerBytes = EncodeHeaderLine();
+        _headerBytes = EncodeHeaderLine(options.EnableAsn);
+        _showAsn     = options.EnableAsn;
 
         // 16 KB frame buffer — ample for 30 hops × ~150 bytes + title/header overhead.
         _writer = new AnsiWriter(16 * 1024);
@@ -176,6 +179,15 @@ internal sealed class MtrAnsiRenderer
         WriteRttColumn(hasRtt && h.Worst > double.MinValue ? h.Worst : double.NaN, numBuf);
         _writer.Write(ColSep);
         WriteRttColumn(hasRtt ? h.StdDev                                      : double.NaN, numBuf);
+        _writer.Write(ColSep);
+        WriteRttColumn(!double.IsNaN(h.Jitter) ? h.Jitter : double.NaN, numBuf);
+
+        // ── ASN column ────────────────────────────────────────────────────────
+        if (_showAsn)
+        {
+            _writer.Write(ColSep);
+            WriteAsnColumn(in h);
+        }
 
         _writer.EraseEol();
         _writer.NewLine();
@@ -218,6 +230,26 @@ internal sealed class MtrAnsiRenderer
             _writer.WriteFixed(buf[..written], width, rightAlign: true);
         else
             _writer.WriteFixed(value.ToString().AsSpan(), width, rightAlign: true);
+    }
+
+    private void WriteAsnColumn(in HopStats h)
+    {
+        if (!h.AsnResolved)
+        {
+            // Resolution in-flight — show a grey placeholder.
+            _writer.Grey();
+            _writer.WriteFixed("...".AsSpan(), W_Asn, rightAlign: false);
+            _writer.Reset();
+            return;
+        }
+
+        string display = h.Asn is { } asn ? asn.ToString() : "???";
+        ReadOnlySpan<char> span = display.Length > W_Asn
+            ? display.AsSpan(0, W_Asn)
+            : display.AsSpan();
+        _writer.Grey();
+        _writer.WriteFixed(span, W_Asn, rightAlign: false);
+        _writer.Reset();
     }
 
     // ── per-hop host label cache ──────────────────────────────────────────────
@@ -381,11 +413,11 @@ internal sealed class MtrAnsiRenderer
         return buf[..pos];
     }
 
-    private static byte[] EncodeHeaderLine()
+    private static byte[] EncodeHeaderLine(bool showAsn = false)
     {
-        // "HOST                                     Loss%    Snt   Last    Avg   Best   Wrst  StDev"
+        // "HOST                                     Loss%    Snt   Last    Avg   Best   Wrst  StDev  Jitter  [ASN]"
         // All bold.
-        byte[] buf = new byte[256];
+        byte[] buf = new byte[320];
         int pos = 0;
 
         "\x1B[1m"u8.CopyTo(buf.AsSpan(pos)); pos += 4;   // bold on
@@ -396,13 +428,17 @@ internal sealed class MtrAnsiRenderer
         buf.AsSpan(pos, W_Host - hostHdr.Length).Fill((byte)' '); pos += W_Host - hostHdr.Length;
 
         // Right-aligned column headers.
-        pos += AppendRightAligned("  Loss%"u8, W_Loss + 2, buf.AsSpan(pos));
-        pos += AppendRightAligned("  Snt"u8,   W_Snt  + 2, buf.AsSpan(pos));
-        pos += AppendRightAligned("  Last"u8,  W_Rtt  + 2, buf.AsSpan(pos));
-        pos += AppendRightAligned("  Avg"u8,   W_Rtt  + 2, buf.AsSpan(pos));
-        pos += AppendRightAligned("  Best"u8,  W_Rtt  + 2, buf.AsSpan(pos));
-        pos += AppendRightAligned("  Wrst"u8,  W_Rtt  + 2, buf.AsSpan(pos));
-        pos += AppendRightAligned("  StDev"u8, W_Rtt  + 2, buf.AsSpan(pos));
+        pos += AppendRightAligned("  Loss%"u8,  W_Loss + 2, buf.AsSpan(pos));
+        pos += AppendRightAligned("  Snt"u8,    W_Snt  + 2, buf.AsSpan(pos));
+        pos += AppendRightAligned("  Last"u8,   W_Rtt  + 2, buf.AsSpan(pos));
+        pos += AppendRightAligned("  Avg"u8,    W_Rtt  + 2, buf.AsSpan(pos));
+        pos += AppendRightAligned("  Best"u8,   W_Rtt  + 2, buf.AsSpan(pos));
+        pos += AppendRightAligned("  Wrst"u8,   W_Rtt  + 2, buf.AsSpan(pos));
+        pos += AppendRightAligned("  StDev"u8,  W_Rtt  + 2, buf.AsSpan(pos));
+        pos += AppendRightAligned("  Jitter"u8, W_Rtt  + 2, buf.AsSpan(pos));
+
+        if (showAsn)
+            pos += AppendRightAligned("  ASN"u8, W_Asn + 2, buf.AsSpan(pos));
 
         "\x1B[0m"u8.CopyTo(buf.AsSpan(pos)); pos += 4;   // bold off
 

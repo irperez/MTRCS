@@ -50,6 +50,20 @@ internal sealed class MtrCommand : AsyncCommand<MtrCommand.Settings>
         [DefaultValue(10)]
         public int ReportCycles { get; init; } = 10;
 
+        [Description("Show ASN (Autonomous System Number) column via Team Cymru DNS lookup.")]
+        [CommandOption("-a|--asn")]
+        [DefaultValue(false)]
+        public bool ShowAsn { get; init; }
+
+        [Description("Output file path for report export (requires --report).")]
+        [CommandOption("-o|--output")]
+        public string? OutputPath { get; init; }
+
+        [Description("Export format: text, csv, json. Default: text")]
+        [CommandOption("-f|--format")]
+        [DefaultValue("text")]
+        public string OutputFormat { get; init; } = "text";
+
         public override ValidationResult Validate()
         {
             if (string.IsNullOrWhiteSpace(Host))
@@ -64,6 +78,10 @@ internal sealed class MtrCommand : AsyncCommand<MtrCommand.Settings>
                 return ValidationResult.Error("--size must be non-negative.");
             if (ReportCycles < 1)
                 return ValidationResult.Error("--cycles must be at least 1.");
+            if (OutputPath is not null && !Report)
+                return ValidationResult.Error("--output requires --report mode.");
+            if (OutputFormat is not ("text" or "csv" or "json"))
+                return ValidationResult.Error("--format must be one of: text, csv, json.");
             return ValidationResult.Success();
         }
     }
@@ -82,7 +100,8 @@ internal sealed class MtrCommand : AsyncCommand<MtrCommand.Settings>
                 settings.MaxHops,
                 settings.IntervalMs,
                 settings.TimeoutMs,
-                settings.PayloadBytes).ConfigureAwait(false);
+                settings.PayloadBytes,
+                settings.ShowAsn).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -100,13 +119,14 @@ internal sealed class MtrCommand : AsyncCommand<MtrCommand.Settings>
 
         IPingerFactory pingerFactory = new SystemPingerFactory(settings.PayloadBytes);
         IDnsResolver dnsResolver = new SystemDnsResolver();
+        IAsnResolver? asnResolver = settings.ShowAsn ? new CymruAsnResolver() : null;
 
-        await using TracerouteSession session = new(options, pingerFactory, dnsResolver);
+        await using TracerouteSession session = new(options, pingerFactory, dnsResolver, asnResolver);
 
         await session.StartAsync(cts.Token).ConfigureAwait(false);
 
         if (settings.Report)
-            return await RunReportModeAsync(session, options, settings.ReportCycles, cts.Token).ConfigureAwait(false);
+            return await RunReportModeAsync(session, options, settings, cts.Token).ConfigureAwait(false);
 
         return await RunLiveModeAsync(session, options, cts.Token).ConfigureAwait(false);
     }
@@ -120,7 +140,6 @@ internal sealed class MtrCommand : AsyncCommand<MtrCommand.Settings>
     {
         var renderer = new MtrAnsiRenderer(options);
         renderer.BeginLive();
-
         try
         {
             while (!ct.IsCancellationRequested)
@@ -155,15 +174,15 @@ internal sealed class MtrCommand : AsyncCommand<MtrCommand.Settings>
     private static async Task<int> RunReportModeAsync(
         ITracerouteSession session,
         TracerouteOptions options,
-        int cycles,
+        Settings settings,
         CancellationToken ct)
     {
         var renderer = new MtrRenderer(options);
 
-        AnsiConsole.MarkupLine($"[grey]Running {cycles} cycle(s) — please wait...[/]");
+        AnsiConsole.MarkupLine($"[grey]Running {settings.ReportCycles} cycle(s) — please wait...[/]");
 
         // Wait for the requested number of cycles (approximated by interval × cycles).
-        long targetMs = (long)cycles * options.IntervalMs;
+        long targetMs = (long)settings.ReportCycles * options.IntervalMs;
         try
         {
             await Task.Delay((int)Math.Min(targetMs, int.MaxValue), ct).ConfigureAwait(false);
@@ -172,7 +191,17 @@ internal sealed class MtrCommand : AsyncCommand<MtrCommand.Settings>
 
         await session.StopAsync().ConfigureAwait(false);
 
+        // Always print the table to the terminal.
         AnsiConsole.Write(renderer.Refresh(session));
+
+        // Optionally export to file.
+        if (settings.OutputPath is { Length: > 0 } outputPath)
+        {
+            var exporter = new ReportExporter(options);
+            await exporter.ExportAsync(session, outputPath, settings.OutputFormat, ct).ConfigureAwait(false);
+            AnsiConsole.MarkupLine($"[grey]Report saved to:[/] [bold]{outputPath}[/]");
+        }
+
         return 0;
     }
 }
