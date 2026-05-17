@@ -64,18 +64,26 @@ internal sealed class SystemPinger : IPinger
 
         try
         {
+            long sentTicks = System.Diagnostics.Stopwatch.GetTimestamp();
+
             PingReply reply = await _ping
                 .SendPingAsync(target, timeoutMs, _payloadBuffer[..useBytes], _pingOptions)
                 .WaitAsync(cancellationToken)
                 .ConfigureAwait(false);
 
+            // System.Net.NetworkInformation.Ping only populates RoundtripTime for Success;
+            // for TtlExpired (intermediate hops) it returns 0.  Measure it ourselves.
+            double measuredRtt = reply.RoundtripTime > 0
+                ? reply.RoundtripTime
+                : System.Diagnostics.Stopwatch.GetElapsedTime(sentTicks).TotalMilliseconds;
+
             return reply.Status switch
             {
                 IPStatus.Success =>
-                    ProbeResult.FromResponse(ttl, reply.Address, reply.RoundtripTime, PingStatus.Success, sequence),
+                    ProbeResult.FromResponse(ttl, reply.Address, measuredRtt, PingStatus.Success, sequence),
 
                 IPStatus.TtlExpired =>
-                    ProbeResult.FromResponse(ttl, reply.Address, reply.RoundtripTime, PingStatus.TtlExpired, sequence),
+                    ProbeResult.FromResponse(ttl, reply.Address, measuredRtt, PingStatus.TtlExpired, sequence),
 
                 IPStatus.DestinationHostUnreachable or
                 IPStatus.DestinationNetworkUnreachable or
