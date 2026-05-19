@@ -28,8 +28,10 @@ internal sealed class AnsiWriter : IDisposable
     private static ReadOnlySpan<byte> BoldOn           => "\x1B[1m"u8;
     private static ReadOnlySpan<byte> ColorCyan        => "\x1B[96m"u8;
     private static ReadOnlySpan<byte> ColorGrey        => "\x1B[90m"u8;
+    private static ReadOnlySpan<byte> ColorGreen        => "\x1B[92m"u8;
     private static ReadOnlySpan<byte> ColorRed         => "\x1B[91m"u8;
     private static ReadOnlySpan<byte> ColorYellow      => "\x1B[93m"u8;
+    private static ReadOnlySpan<byte> ColorMagenta     => "\x1B[95m"u8;
     private static ReadOnlySpan<byte> HideCursor       => "\x1B[?25l"u8;
     private static ReadOnlySpan<byte> ShowCursor       => "\x1B[?25h"u8;
     private static ReadOnlySpan<byte> EnterAltScreen   => "\x1B[?1049h"u8;
@@ -88,9 +90,11 @@ internal sealed class AnsiWriter : IDisposable
     internal void Reset()      => WriteRaw(ResetColor);
     internal void Bold()       => WriteRaw(BoldOn);
     internal void Cyan()       => WriteRaw(ColorCyan);
+    internal void Green()      => WriteRaw(ColorGreen);
     internal void Grey()       => WriteRaw(ColorGrey);
     internal void Red()        => WriteRaw(ColorRed);
     internal void Yellow()     => WriteRaw(ColorYellow);
+    internal void Magenta()    => WriteRaw(ColorMagenta);
 
     // ── text ──────────────────────────────────────────────────────────────────
 

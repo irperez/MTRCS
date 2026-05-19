@@ -81,8 +81,17 @@ internal sealed class MtrAnsiRenderer
     // ── snapshot buffer ───────────────────────────────────────────────────────
     private readonly HopStats[] _snapBuffer;
 
-    // ── sparkline ring sample buffer ──────────────────────────────────────────
+    // ── sparkline ring sample buffer (per-hop sparkline reuse scratch) ─────────
     private readonly double[] _ringBuf;
+
+    // ── destination latency history (scrolling graph) ─────────────────────────
+    // Stores one RTT sample per ping cycle for the destination (last responding hop).
+    // Large enough to cover the widest realistic terminal (~500 cols).
+    private const int LatencyHistorySize = 512;
+    private readonly double[] _latencyHistory = new double[LatencyHistorySize];
+    private int _latencyHead;   // next write index (wraps)
+    private int _latencyCount;  // samples filled so far (≤ LatencyHistorySize)
+    private int _latencyLastSent; // destination hop Sent count at last sample — gates one-per-ping
 
     // ── frame writer ──────────────────────────────────────────────────────────
     private readonly AnsiWriter _writer;
@@ -169,6 +178,9 @@ internal sealed class MtrAnsiRenderer
         _writer.EraseEol();
         _writer.NewLine();
 
+        // ── destination latency bar graph ─────────────────────────────────────
+        WriteLatencyGraph(count);
+
         // ── Packets / Pings sub-header ────────────────────────────────────────
         _writer.EraseEol();
         WriteSubHeader();
@@ -206,7 +218,120 @@ internal sealed class MtrAnsiRenderer
         _writer.Flush();
     }
 
-    // Writes the start timestamp right-justified on the current line.
+    // ── 8-level Unicode bar blocks (▁ ▂ ▃ ▄ ▅ ▆ ▇ █) ─────────────────────────
+    private static ReadOnlySpan<char> BarBlocks => "\u2581\u2582\u2583\u2584\u2585\u2586\u2587\u2588";
+
+    // Writes the full-width scrolling latency history chart.
+    // One column is appended per ping cycle for the destination (last responding hop).
+    // The chart scrolls left as new samples arrive, identical in behaviour to the per-hop sparklines
+    // but filling the full terminal width and using color-coded columns.
+    // A compact legend sits to the right on the same line.
+    private void WriteLatencyGraph(int hopCount)
+    {
+        // Legend: " ■≤10  ■≤50  ■≤150  ■≤300  ■>300ms"  = 34 display columns.
+        // ■ (U+25A0) and ≤ (U+2264) are each 1 display column on all modern terminals.
+        const int LegendWidth = 34;
+
+        int consoleWidth = Console.WindowWidth;
+        int chartWidth   = consoleWidth - LegendWidth;
+        if (chartWidth < 4)
+        {
+            _writer.EraseEol();
+            _writer.NewLine();
+            return;
+        }
+
+        // ── find destination hop (last responding) ─────────────────────────────
+        double destLast = double.NaN;
+        int    destSent = 0;
+        for (int i = hopCount - 1; i >= 0; i--)
+        {
+            ref readonly HopStats h = ref _snapBuffer[i];
+            if (h.Sent > h.Lost && !double.IsNaN(h.Last) && h.Last > 0)
+            {
+                destLast = h.Last;
+                destSent = h.Sent;
+                break;
+            }
+        }
+
+        // ── append one sample per new ping ────────────────────────────────────
+        // Gate on Sent count changing so we add exactly one entry per probe cycle,
+        // not once per render frame (which fires more frequently).
+        if (!double.IsNaN(destLast) && destSent != _latencyLastSent)
+        {
+            _latencyHistory[_latencyHead] = destLast;
+            _latencyHead = (_latencyHead + 1) % LatencyHistorySize;
+            if (_latencyCount < LatencyHistorySize) _latencyCount++;
+            _latencyLastSent = destSent;
+        }
+
+        // ── build the visible window (oldest → newest, left → right) ──────────
+        // Show the most-recent min(chartWidth, _latencyCount) samples.
+        int visible = Math.Min(chartWidth, _latencyCount);
+
+        // ── adaptive vertical scale over visible window ────────────────────────
+        double winMax = 0.0;
+        for (int i = 0; i < visible; i++)
+        {
+            int idx = (_latencyHead - visible + i + LatencyHistorySize) % LatencyHistorySize;
+            if (_latencyHistory[idx] > winMax) winMax = _latencyHistory[idx];
+        }
+        // Add 20% headroom so the tallest bar never clips at the top.
+        double scaleMax = Math.Max(10.0, winMax * 1.20);
+
+        // ── draw empty (future) columns on the left ────────────────────────────
+        int emptyLeft = chartWidth - visible;
+        if (emptyLeft > 0)
+        {
+            _writer.Grey();
+            Span<char> pad = stackalloc char[Math.Min(emptyLeft, 512)];
+            pad[..Math.Min(emptyLeft, 512)].Fill(' ');
+            _writer.WriteFixed(pad[..Math.Min(emptyLeft, 512)], emptyLeft, rightAlign: false);
+            _writer.Reset();
+        }
+
+        // ── draw each sample column ────────────────────────────────────────────
+        Span<char> colBuf = stackalloc char[1];
+        for (int i = 0; i < visible; i++)
+        {
+            int idx = (_latencyHead - visible + i + LatencyHistorySize) % LatencyHistorySize;
+            double rtt = _latencyHistory[idx];
+
+            // Pick block character: 0 → ▁, 7 → █
+            int level = (int)Math.Round(rtt / scaleMax * 7.0);
+            level      = Math.Clamp(level, 0, 7);
+            colBuf[0]  = BarBlocks[level];
+
+            // Color by threshold tier
+            if      (rtt <=  10.0) _writer.Green();
+            else if (rtt <=  50.0) _writer.Cyan();
+            else if (rtt <= 150.0) _writer.Yellow();
+            else if (rtt <= 300.0) _writer.Red();
+            else                   _writer.Magenta();
+
+            _writer.WriteFixed(colBuf, 1, rightAlign: false);
+        }
+
+        _writer.Reset();
+
+        // ── legend ─────────────────────────────────────────────────────────────
+        _writer.Write(" ");
+        _writer.Green();   _writer.Write("\u25a0\u226410");
+        _writer.Reset();   _writer.Write("  ");
+        _writer.Cyan();    _writer.Write("\u25a0\u226450");
+        _writer.Reset();   _writer.Write("  ");
+        _writer.Yellow();  _writer.Write("\u25a0\u2264150");
+        _writer.Reset();   _writer.Write("  ");
+        _writer.Red();     _writer.Write("\u25a0\u2264300");
+        _writer.Reset();   _writer.Write("  ");
+        _writer.Magenta(); _writer.Write("\u25a0>300ms");
+        _writer.Reset();
+
+        _writer.EraseEol();
+        _writer.NewLine();
+    }
+
     // Format matches MTR: "ddd MMM  d HH:mm:ss yyyy"  (single-digit day gets extra space).
     // When isActive is true, a spinning ASCII animation is drawn to the left of the timestamp.
     private void WriteTitleTimestamp(bool isActive)
@@ -525,7 +650,9 @@ internal sealed class MtrAnsiRenderer
 
     private void WriteSparklineColumn(in HopStats h)
     {
-        int count = h.CopyRingSamples(_ringBuf.AsSpan(0, Math.Min(W_Spark, HopStats.RingBufferSize)));
+        // Request all available samples so we always get the newest W_Spark entries.
+        // Requesting only W_Spark would give the oldest W_Spark when the ring is full.
+        int count = h.CopyRingSamples(_ringBuf.AsSpan(0, HopStats.RingBufferSize));
         if (count == 0)
         {
             _writer.Grey();
@@ -534,20 +661,26 @@ internal sealed class MtrAnsiRenderer
             return;
         }
 
-        // Find min/max over the sample window for scaling.
+        // Take the newest W_Spark samples (oldest-first ordering from CopyRingSamples).
+        int filled = Math.Min(count, W_Spark);
+        int offset = count - filled;   // skip the oldest entries, keep the newest W_Spark
+
+        // Find min/max over the visible window for scaling.
         double min = double.MaxValue, max = double.MinValue;
-        for (int i = 0; i < count; i++)
+        for (int i = 0; i < filled; i++)
         {
-            if (_ringBuf[i] < min) min = _ringBuf[i];
-            if (_ringBuf[i] > max) max = _ringBuf[i];
+            if (_ringBuf[offset + i] < min) min = _ringBuf[offset + i];
+            if (_ringBuf[offset + i] > max) max = _ringBuf[offset + i];
         }
 
         double range = max - min;
 
-        // Write up to W_Spark sparkline chars; pad the rest with spaces.
+        // Build sparkline right-aligned: spaces on the left, bars on the right.
+        // This way the first bar appears on the right and scrolls left as new bars arrive.
         Span<char> sparkBuf = stackalloc char[W_Spark];
-        int filled = Math.Min(count, W_Spark);
-        int offset = count > W_Spark ? count - W_Spark : 0;   // show most recent W_Spark samples
+        int padLeft = W_Spark - filled;
+        for (int i = 0; i < padLeft; i++)
+            sparkBuf[i] = ' ';
 
         for (int i = 0; i < filled; i++)
         {
@@ -556,10 +689,8 @@ internal sealed class MtrAnsiRenderer
                 ? 4                     // flat line — use mid-level block
                 : (int)((v - min) / range * 7.0);
             level = Math.Clamp(level, 0, 7);
-            sparkBuf[i] = SparkBlocks[level];
+            sparkBuf[padLeft + i] = SparkBlocks[level];
         }
-        for (int i = filled; i < W_Spark; i++)
-            sparkBuf[i] = ' ';
 
         // Color the sparkline using the Avg RTT thresholds.
         double avg = h.Average;
