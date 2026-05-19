@@ -18,10 +18,13 @@ internal sealed class MtrRenderer
     private const int W_Snt    =  5;
     private const int W_Rtt    =  7;
     private const int W_Asn    = 20;
+    private const int W_Spark  =  8;
     private const string ColSep = "  ";
 
     private readonly TracerouteOptions _options;
+    private readonly RttThresholds _thresholds;
     private readonly HopStats[] _snapBuffer;
+    private readonly double[] _ringBuf;
 
     // ── pre-encoded constant sequences ───────────────────────────────────────
     private readonly byte[] _titleBytes;
@@ -30,10 +33,12 @@ internal sealed class MtrRenderer
     // ── per-hop caches ────────────────────────────────────────────────────────
     private readonly string[] _ttlPrefixes;
 
-    internal MtrRenderer(TracerouteOptions options)
+    internal MtrRenderer(TracerouteOptions options, RttThresholds thresholds = default)
     {
         _options    = options;
+        _thresholds = thresholds;
         _snapBuffer = new HopStats[options.MaxHops];
+        _ringBuf    = new double[HopStats.RingBufferSize];
 
         _ttlPrefixes = new string[options.MaxHops];
         for (int i = 0; i < options.MaxHops; i++)
@@ -208,19 +213,66 @@ internal sealed class MtrRenderer
         }
     }
 
-    private static void WriteRttColumn(AnsiWriter w, double ms, Span<char> buf)
+    private void WriteRttColumn(AnsiWriter w, double ms, Span<char> buf)
     {
         if (double.IsNaN(ms))
         {
             w.Grey();
             w.WriteFixed("???".AsSpan(), W_Rtt, rightAlign: true);
             w.Reset();
+            return;
         }
-        else
+
+        bool colored = false;
+        if (_thresholds.CritRtt > 0 && ms >= _thresholds.CritRtt) { w.Red();    colored = true; }
+        else if (_thresholds.WarnRtt > 0 && ms >= _thresholds.WarnRtt) { w.Yellow(); colored = true; }
+
+        FormatF1(ms, buf, out int len);
+        w.WriteFixed(buf[..len], W_Rtt, rightAlign: true);
+        if (colored) w.Reset();
+    }
+
+    // Sparkline block characters ordered lowest-to-highest (8 levels).
+    private static ReadOnlySpan<char> SparkBlocks => "\u2581\u2582\u2583\u2584\u2585\u2586\u2587\u2588";
+
+    private void WriteSparklineColumn(AnsiWriter w, in HopStats h)
+    {
+        int count = h.CopyRingSamples(_ringBuf.AsSpan(0, W_Spark));
+        if (count == 0)
         {
-            FormatF1(ms, buf, out int len);
-            w.WriteFixed(buf[..len], W_Rtt, rightAlign: true);
+            w.Grey();
+            w.WriteFixed("-".AsSpan(), W_Spark);
+            w.Reset();
+            return;
         }
+
+        double min = double.MaxValue, max = double.MinValue;
+        for (int i = 0; i < count; i++)
+        {
+            if (_ringBuf[i] < min) min = _ringBuf[i];
+            if (_ringBuf[i] > max) max = _ringBuf[i];
+        }
+
+        double range = max - min;
+        int offset = count > W_Spark ? count - W_Spark : 0;
+        int filled = Math.Min(count, W_Spark);
+        Span<char> sparkBuf = stackalloc char[W_Spark];
+
+        for (int i = 0; i < filled; i++)
+        {
+            int level = range < 0.01 ? 4 : (int)((_ringBuf[offset + i] - min) / range * 7.0);
+            sparkBuf[i] = SparkBlocks[Math.Clamp(level, 0, 7)];
+        }
+        for (int i = filled; i < W_Spark; i++)
+            sparkBuf[i] = ' ';
+
+        double avg = h.Average;
+        if (_thresholds.CritRtt > 0 && avg >= _thresholds.CritRtt)      w.Red();
+        else if (_thresholds.WarnRtt > 0 && avg >= _thresholds.WarnRtt) w.Yellow();
+        else                                                              w.Cyan();
+
+        w.WriteFixed(sparkBuf[..W_Spark], W_Spark);
+        w.Reset();
     }
 
     private static void FormatF1(double value, Span<char> buf, out int len)
@@ -271,6 +323,8 @@ internal sealed class MtrRenderer
         w.WriteFixed("StDev".AsSpan(),  W_Rtt,   rightAlign: true);
         w.Write(ColSep);
         w.WriteFixed("Jitter".AsSpan(), W_Rtt,   rightAlign: true);
+        w.Write(ColSep);
+        w.WriteFixed("Graph".AsSpan(),  W_Spark);
         if (showAsn)
         {
             w.Write(ColSep);

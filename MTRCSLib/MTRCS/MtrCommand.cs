@@ -24,7 +24,11 @@ internal sealed class MtrCommand
         bool useUdp,
         int port,
         string? outputPath,
-        string outputFormat)
+        string outputFormat,
+        double warnLoss,
+        double critLoss,
+        double warnRtt,
+        double critRtt)
     {
         internal string  Host         { get; } = host;
         internal int     MaxHops      { get; } = maxHops;
@@ -39,6 +43,19 @@ internal sealed class MtrCommand
         internal int     Port         { get; } = port;
         internal string? OutputPath   { get; } = outputPath;
         internal string  OutputFormat { get; } = outputFormat;
+        internal double  WarnLoss     { get; } = warnLoss;
+        internal double  CritLoss     { get; } = critLoss;
+        internal double  WarnRtt      { get; } = warnRtt;
+        internal double  CritRtt      { get; } = critRtt;
+
+        /// <summary>Builds the <see cref="RttThresholds"/> from CLI settings.</summary>
+        internal RttThresholds BuildThresholds() => new()
+        {
+            WarnLoss = WarnLoss > 0 ? WarnLoss : RttThresholds.Default.WarnLoss,
+            CritLoss = CritLoss > 0 ? CritLoss : RttThresholds.Default.CritLoss,
+            WarnRtt  = WarnRtt,
+            CritRtt  = CritRtt,
+        };
 
         /// <summary>Returns <see langword="null"/> if valid; otherwise an error message.</summary>
         internal string? Validate()
@@ -63,6 +80,14 @@ internal sealed class MtrCommand
                 return "--output requires --report mode.";
             if (OutputFormat is not ("text" or "csv" or "json"))
                 return "--format must be one of: text, csv, json.";
+            if (WarnLoss < 0 || WarnLoss > 100)
+                return "--warn-loss must be between 0 and 100.";
+            if (CritLoss < 0 || CritLoss > 100)
+                return "--crit-loss must be between 0 and 100.";
+            if (WarnRtt < 0)
+                return "--warn-rtt must be non-negative.";
+            if (CritRtt < 0)
+                return "--crit-rtt must be non-negative.";
             return null;
         }
     }
@@ -123,10 +148,12 @@ internal sealed class MtrCommand
         await using TracerouteSession session = new(options, pingerFactory, dnsResolver, asnResolver);
         await session.StartAsync(cts.Token).ConfigureAwait(false);
 
-        if (settings.Report)
-            return await RunReportModeAsync(session, options, settings, cts.Token).ConfigureAwait(false);
+        RttThresholds thresholds = settings.BuildThresholds();
 
-        return await RunLiveModeAsync(session, options, cts.Token).ConfigureAwait(false);
+        if (settings.Report)
+            return await RunReportModeAsync(session, options, settings, thresholds, cts.Token).ConfigureAwait(false);
+
+        return await RunLiveModeAsync(session, options, thresholds, cts.Token).ConfigureAwait(false);
     }
 
     // ── live mode ─────────────────────────────────────────────────────────────
@@ -134,9 +161,10 @@ internal sealed class MtrCommand
     private static async Task<int> RunLiveModeAsync(
         ITracerouteSession session,
         TracerouteOptions options,
+        RttThresholds thresholds,
         CancellationToken ct)
     {
-        var renderer = new MtrAnsiRenderer(options);
+        var renderer = new MtrAnsiRenderer(options, thresholds);
         renderer.BeginLive();
         try
         {
@@ -187,9 +215,10 @@ internal sealed class MtrCommand
         ITracerouteSession session,
         TracerouteOptions options,
         Settings settings,
+        RttThresholds thresholds,
         CancellationToken ct)
     {
-        var renderer = new MtrRenderer(options);
+        var renderer = new MtrRenderer(options, thresholds);
 
         Console.Error.Write("Running ");
         Console.Error.Write(settings.ReportCycles);

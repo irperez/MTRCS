@@ -34,17 +34,18 @@ internal sealed class MtrAnsiRenderer
     private const int W_Snt   =  5;
     private const int W_Rtt   =  7;   // Last / Avg / Best / Wrst / StDev / Jitter all use this width
     private const int W_Asn   = 20;   // ASN column (e.g. "AS15169 GOOGLE")
+    private const int W_Spark =  8;   // sparkline column (8 Unicode block chars)
 
     // Two spaces between every column.
     private const string ColSep = "  ";
     private const int ColSepW = 2;
 
-    // Total width of the stats section (Loss%..Jitter), not including ASN.
-    // Loss%(7)+Sep(2)+Snt(5)+Sep(2)+Last(7)+Sep(2)+Avg(7)+Sep(2)+Best(7)+Sep(2)+Wrst(7)+Sep(2)+StDev(7)+Sep(2)+Jitter(7) = 66
+    // Total width of the stats section (Loss%..Jitter+Sparkline), not including ASN.
+    // Loss%(7)+Sep(2)+Snt(5)+Sep(2)+Last(7)+Sep(2)+Avg(7)+Sep(2)+Best(7)+Sep(2)+Wrst(7)+Sep(2)+StDev(7)+Sep(2)+Jitter(7)+Sep(2)+Sparkline(8) = 76
     private const int W_Stats = W_Loss + ColSepW + W_Snt + ColSepW
                               + W_Rtt + ColSepW + W_Rtt + ColSepW
                               + W_Rtt + ColSepW + W_Rtt + ColSepW
-                              + W_Rtt + ColSepW + W_Rtt;   // = 66
+                              + W_Rtt + ColSepW + W_Rtt + ColSepW + W_Spark;   // = 76
 
     // ── pre-encoded constant byte sequences ───────────────────────────────────
 
@@ -56,7 +57,11 @@ internal sealed class MtrAnsiRenderer
     private readonly byte[] _hostHeaderBytes;   // "HOST" left-padded to W_Host, bold
     private readonly byte[] _statsHeaderBytes;  // "Loss%  Snt  Last  Avg  Best  Wrst  StDev  Jitter" bold
     private readonly byte[] _asnHeaderBytes;    // "ASN" bold
+    private readonly byte[] _sparklineHeaderBytes; // "Graph" bold
     private readonly bool _showAsn;
+
+    // ── thresholds ─────────────────────────────────────────────────────────────
+    private readonly RttThresholds _thresholds;
 
     // ── start timestamp ───────────────────────────────────────────────────────
     private readonly DateTime _startedAt;
@@ -76,19 +81,24 @@ internal sealed class MtrAnsiRenderer
     // ── snapshot buffer ───────────────────────────────────────────────────────
     private readonly HopStats[] _snapBuffer;
 
+    // ── sparkline ring sample buffer ──────────────────────────────────────────
+    private readonly double[] _ringBuf;
+
     // ── frame writer ──────────────────────────────────────────────────────────
     private readonly AnsiWriter _writer;
 
-    internal MtrAnsiRenderer(TracerouteOptions options)
+    internal MtrAnsiRenderer(TracerouteOptions options, RttThresholds thresholds = default)
     {
         int maxHops = options.MaxHops;
 
         _snapBuffer       = new HopStats[maxHops];
+        _ringBuf          = new double[HopStats.RingBufferSize];
         _hopHostBytes     = new byte[maxHops][];
         _hopLastAddress   = new string?[maxHops];
         _hopLastHostName  = new string?[maxHops];
         _hopLastHostWidth = new int[maxHops];
         _ttlPrefixes      = new string[maxHops];
+        _thresholds       = thresholds;
 
         for (int i = 0; i < maxHops; i++)
         {
@@ -108,6 +118,7 @@ internal sealed class MtrAnsiRenderer
         _hostHeaderBytes  = EncodeHostHeaderBytes();
         _statsHeaderBytes = EncodeStatsHeaderBytes();
         _asnHeaderBytes   = EncodeAsnHeaderBytes();
+        _sparklineHeaderBytes = EncodeSparklineHeaderBytes();
         _showAsn          = options.EnableAsn;
         _startedAt        = DateTime.Now;
 
@@ -332,6 +343,10 @@ internal sealed class MtrAnsiRenderer
         _writer.Write(ColSep);
         WriteRttColumn(!double.IsNaN(h.Jitter) ? h.Jitter : double.NaN, numBuf);
 
+        // ── Graph (sparkline) column ──────────────────────────────────────────
+        _writer.Write(ColSep);
+        WriteSparklineColumn(in h);
+
         // ── ASN column ────────────────────────────────────────────────────────
         if (_showAsn)
         {
@@ -397,6 +412,7 @@ internal sealed class MtrAnsiRenderer
         }
     }
 
+    // Also used for individual RTT columns; caller passes avg RTT only for the coloring check.
     private void WriteRttColumn(double ms, Span<char> buf)
     {
         if (double.IsNaN(ms))
@@ -406,25 +422,47 @@ internal sealed class MtrAnsiRenderer
             return;
         }
 
+        if (_thresholds.CritRtt > 0 && ms >= _thresholds.CritRtt)
+            _writer.Red();
+        else if (_thresholds.WarnRtt > 0 && ms >= _thresholds.WarnRtt)
+            _writer.Yellow();
+
         if (ms.TryFormat(buf, out int written, "F1"))
             _writer.WriteFixed(buf[..written], W_Rtt, rightAlign: true);
         else
             _writer.WriteFixed(ms.ToString("F1").AsSpan(), W_Rtt, rightAlign: true);
+
+        if ((_thresholds.CritRtt > 0 && ms >= _thresholds.CritRtt) ||
+            (_thresholds.WarnRtt > 0 && ms >= _thresholds.WarnRtt))
+            _writer.Reset();
     }
 
     private void WriteColoredRttColumn(double pct, Span<char> buf, bool isLoss)
     {
-        if (isLoss && pct >= 10.0)
-            _writer.Red();
-        else if (isLoss && pct > 0.0)
-            _writer.Yellow();
+        if (isLoss)
+        {
+            if (pct >= _thresholds.CritLoss)
+                _writer.Red();
+            else if (pct >= _thresholds.WarnLoss)
+                _writer.Yellow();
+        }
+        else
+        {
+            // RTT coloring — only applied when thresholds are configured (> 0).
+            if (_thresholds.CritRtt > 0 && pct >= _thresholds.CritRtt)
+                _writer.Red();
+            else if (_thresholds.WarnRtt > 0 && pct >= _thresholds.WarnRtt)
+                _writer.Yellow();
+        }
 
         if (pct.TryFormat(buf, out int written, "F1"))
-            _writer.WriteFixed(buf[..written], W_Loss, rightAlign: true);
+            _writer.WriteFixed(buf[..written], isLoss ? W_Loss : W_Rtt, rightAlign: true);
         else
-            _writer.WriteFixed(pct.ToString("F1").AsSpan(), W_Loss, rightAlign: true);
+            _writer.WriteFixed(pct.ToString("F1").AsSpan(), isLoss ? W_Loss : W_Rtt, rightAlign: true);
 
-        if (isLoss && pct > 0.0)
+        if (isLoss && pct >= _thresholds.WarnLoss)
+            _writer.Reset();
+        else if (!isLoss && _thresholds.CritRtt > 0 && pct >= _thresholds.WarnRtt)
             _writer.Reset();
     }
 
@@ -456,7 +494,61 @@ internal sealed class MtrAnsiRenderer
         _writer.Reset();
     }
 
-    // ── per-hop host label cache ──────────────────────────────────────────────
+    // Sparkline block characters ordered lowest-to-highest (8 levels).
+    private static ReadOnlySpan<char> SparkBlocks => "\u2581\u2582\u2583\u2584\u2585\u2586\u2587\u2588";
+
+    private void WriteSparklineColumn(in HopStats h)
+    {
+        int count = h.CopyRingSamples(_ringBuf.AsSpan(0, Math.Min(W_Spark, HopStats.RingBufferSize)));
+        if (count == 0)
+        {
+            _writer.Grey();
+            _writer.WriteFixed("-".AsSpan(), W_Spark);
+            _writer.Reset();
+            return;
+        }
+
+        // Find min/max over the sample window for scaling.
+        double min = double.MaxValue, max = double.MinValue;
+        for (int i = 0; i < count; i++)
+        {
+            if (_ringBuf[i] < min) min = _ringBuf[i];
+            if (_ringBuf[i] > max) max = _ringBuf[i];
+        }
+
+        double range = max - min;
+
+        // Write up to W_Spark sparkline chars; pad the rest with spaces.
+        Span<char> sparkBuf = stackalloc char[W_Spark];
+        int filled = Math.Min(count, W_Spark);
+        int offset = count > W_Spark ? count - W_Spark : 0;   // show most recent W_Spark samples
+
+        for (int i = 0; i < filled; i++)
+        {
+            double v = _ringBuf[offset + i];
+            int level = range < 0.01
+                ? 4                     // flat line — use mid-level block
+                : (int)((v - min) / range * 7.0);
+            level = Math.Clamp(level, 0, 7);
+            sparkBuf[i] = SparkBlocks[level];
+        }
+        for (int i = filled; i < W_Spark; i++)
+            sparkBuf[i] = ' ';
+
+        // Color the sparkline using the Avg RTT thresholds.
+        double avg = h.Average;
+        if (_thresholds.CritRtt > 0 && avg >= _thresholds.CritRtt)
+            _writer.Red();
+        else if (_thresholds.WarnRtt > 0 && avg >= _thresholds.WarnRtt)
+            _writer.Yellow();
+        else
+            _writer.Cyan();
+
+        _writer.WriteFixed(sparkBuf[..W_Spark], W_Spark);
+        _writer.Reset();
+    }
+
+
 
     private byte[] GetOrBuildHostBytes(int hopIndex, in HopStats h, int hostWidth)
     {
@@ -705,7 +797,8 @@ internal sealed class MtrAnsiRenderer
         pos += AppendRightAligned("  Best"u8,   W_Rtt  + 2, buf.AsSpan(pos));
         pos += AppendRightAligned("  Wrst"u8,   W_Rtt  + 2, buf.AsSpan(pos));
         pos += AppendRightAligned("  StDev"u8,  W_Rtt  + 2, buf.AsSpan(pos));
-        pos += AppendRightAligned("  Jitter"u8, W_Rtt  + 2, buf.AsSpan(pos));
+        pos += AppendRightAligned("  Jitter"u8, W_Rtt   + 2, buf.AsSpan(pos));
+        pos += AppendRightAligned("  Graph"u8,  W_Spark + 2, buf.AsSpan(pos));
 
         if (showAsn)
             pos += AppendRightAligned("  ASN"u8, W_Asn + 2, buf.AsSpan(pos));
@@ -736,20 +829,32 @@ internal sealed class MtrAnsiRenderer
         return buf[..pos];
     }
 
-    // Encodes Loss%..Jitter column headers (right-aligned, bold, no reset).
+    // Encodes Loss%..Sparkline column headers (right-aligned, bold, no reset).
     private static byte[] EncodeStatsHeaderBytes()
     {
-        byte[] buf = new byte[128];
+        byte[] buf = new byte[160];
         int pos = 0;
-        pos += AppendRightAligned("Loss%"u8,  W_Loss, buf.AsSpan(pos));
-        pos += AppendRightAligned("  Snt"u8,  W_Snt  + 2, buf.AsSpan(pos));
-        pos += AppendRightAligned("  Last"u8, W_Rtt  + 2, buf.AsSpan(pos));
-        pos += AppendRightAligned("  Avg"u8,  W_Rtt  + 2, buf.AsSpan(pos));
-        pos += AppendRightAligned("  Best"u8, W_Rtt  + 2, buf.AsSpan(pos));
-        pos += AppendRightAligned("  Wrst"u8, W_Rtt  + 2, buf.AsSpan(pos));
-        pos += AppendRightAligned("  StDev"u8, W_Rtt + 2, buf.AsSpan(pos));
-        pos += AppendRightAligned("  Jitter"u8, W_Rtt + 2, buf.AsSpan(pos));
+        pos += AppendRightAligned("Loss%"u8,    W_Loss, buf.AsSpan(pos));
+        pos += AppendRightAligned("  Snt"u8,    W_Snt  + 2, buf.AsSpan(pos));
+        pos += AppendRightAligned("  Last"u8,   W_Rtt  + 2, buf.AsSpan(pos));
+        pos += AppendRightAligned("  Avg"u8,    W_Rtt  + 2, buf.AsSpan(pos));
+        pos += AppendRightAligned("  Best"u8,   W_Rtt  + 2, buf.AsSpan(pos));
+        pos += AppendRightAligned("  Wrst"u8,   W_Rtt  + 2, buf.AsSpan(pos));
+        pos += AppendRightAligned("  StDev"u8,  W_Rtt  + 2, buf.AsSpan(pos));
+        pos += AppendRightAligned("  Jitter"u8, W_Rtt  + 2, buf.AsSpan(pos));
+        pos += AppendRightAligned("  Graph"u8,  W_Spark + 2, buf.AsSpan(pos));
         "\x1B[0m"u8.CopyTo(buf.AsSpan(pos)); pos += 4;          // reset
+        return buf[..pos];
+    }
+
+    // Encodes "Graph" sparkline column header (left-aligned, bold, reset).
+    private static byte[] EncodeSparklineHeaderBytes()
+    {
+        byte[] buf = new byte[32];
+        int pos = 0;
+        "\x1B[1m"u8.CopyTo(buf.AsSpan(pos)); pos += 4;
+        pos += AppendRightAligned("Graph"u8, W_Spark, buf.AsSpan(pos));
+        "\x1B[0m"u8.CopyTo(buf.AsSpan(pos)); pos += 4;
         return buf[..pos];
     }
 

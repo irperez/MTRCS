@@ -34,6 +34,10 @@ internal static class CliParser
           -P, --port          Destination port for TCP/UDP probes. Default: 80 (TCP) / 33434 (UDP)
           -o, --output        File path for report export (requires --report).
           -f, --format        Export format: text, csv, json. Default: text
+              --warn-loss     Loss% threshold for yellow highlight. Default: 1
+              --crit-loss     Loss% threshold for red highlight. Default: 10
+              --warn-rtt      Avg RTT (ms) threshold for yellow highlight. Default: 0 (off)
+              --crit-rtt      Avg RTT (ms) threshold for red highlight. Default: 0 (off)
           -h, --help          Show this help.
               --version       Show version.
 
@@ -41,6 +45,7 @@ internal static class CliParser
           {AppName} example.com
           {AppName} 8.8.8.8 --max-hops 20 --interval 500
           {AppName} example.com --report --cycles 10 --output report.txt
+          {AppName} example.com --warn-rtt 50 --crit-rtt 150 --crit-loss 5
         """;
 
     /// <summary>
@@ -67,6 +72,10 @@ internal static class CliParser
         int port          = 0;
         string? outputPath   = null;
         string outputFormat  = "text";
+        double warnLoss = 0.0;
+        double critLoss = 0.0;
+        double warnRtt  = 0.0;
+        double critRtt  = 0.0;
 
         for (int i = 0; i < args.Length; i++)
         {
@@ -142,6 +151,22 @@ internal static class CliParser
                     outputFormat = fmt!;
                     break;
 
+                case "--warn-loss":
+                    if (!TryNextDouble(args, ref i, arg, out warnLoss, out string? errWL)) return ParseResult.Fail(errWL!);
+                    break;
+
+                case "--crit-loss":
+                    if (!TryNextDouble(args, ref i, arg, out critLoss, out string? errCL)) return ParseResult.Fail(errCL!);
+                    break;
+
+                case "--warn-rtt":
+                    if (!TryNextDouble(args, ref i, arg, out warnRtt, out string? errWR)) return ParseResult.Fail(errWR!);
+                    break;
+
+                case "--crit-rtt":
+                    if (!TryNextDouble(args, ref i, arg, out critRtt, out string? errCR)) return ParseResult.Fail(errCR!);
+                    break;
+
                 default:
                     if (arg.StartsWith('-'))
                         return ParseResult.Fail($"Unknown option: {arg}");
@@ -160,7 +185,8 @@ internal static class CliParser
         var settings = new MtrCommand.Settings(
             host, maxHops, intervalMs, timeoutMs, payloadBytes,
             report, reportCycles, showAsn, useTcp, useUdp, port,
-            outputPath, outputFormat);
+            outputPath, outputFormat,
+            warnLoss, critLoss, warnRtt, critRtt);
 
         string? validationError = settings.Validate();
         return validationError is null
@@ -196,6 +222,24 @@ internal static class CliParser
             return false;
         }
         value = args[++i];
+        error = null;
+        return true;
+    }
+
+    private static bool TryNextDouble(string[] args, ref int i, string flag, out double value, out string? error)
+    {
+        if (i + 1 >= args.Length)
+        {
+            value = 0;
+            error = $"{flag} requires a value.";
+            return false;
+        }
+        if (!double.TryParse(args[++i], System.Globalization.NumberStyles.Any,
+                System.Globalization.CultureInfo.InvariantCulture, out value))
+        {
+            error = $"{flag} requires a numeric value, got '{args[i]}'.";
+            return false;
+        }
         error = null;
         return true;
     }
