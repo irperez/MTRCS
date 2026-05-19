@@ -225,15 +225,40 @@ internal sealed class MtrAnsiRenderer
     // One column is appended per ping cycle for the destination (last responding hop).
     // The chart scrolls left as new samples arrive, identical in behaviour to the per-hop sparklines
     // but filling the full terminal width and using color-coded columns.
-    // A compact legend sits to the right on the same line.
+    // A compact legend sits to the right on the same line, reflecting the active tier thresholds.
     private void WriteLatencyGraph(int hopCount)
     {
-        // Legend: " ■≤10  ■≤50  ■≤150  ■≤300  ■>300ms"  = 34 display columns.
-        // ■ (U+25A0) and ≤ (U+2264) are each 1 display column on all modern terminals.
-        const int LegendWidth = 34;
+        // Legend format: " ■<G  ■<C  ■<Y  ■<R  ■>R ms" where G/C/Y/R are the tier values.
+        // Each tier entry is "■<NNN" (max 7 chars) + 2-space separator.
+        // We build the legend string to measure its actual width.
+        double g = _thresholds.GraphGreen;
+        double c = _thresholds.GraphCyan;
+        double y = _thresholds.GraphYellow;
+        double r = _thresholds.GraphRed;
+
+        // Build legend text (reuse stack buffers — no heap alloc for typical values).
+        Span<char> legendBuf = stackalloc char[64];
+        int legendPos = 0;
+
+        legendBuf[legendPos++] = ' ';
+        legendPos += AppendLegendTier(legendBuf[legendPos..], '\u25a0', '<', g);
+        legendBuf[legendPos++] = ' '; legendBuf[legendPos++] = ' ';
+        legendPos += AppendLegendTier(legendBuf[legendPos..], '\u25a0', '<', c);
+        legendBuf[legendPos++] = ' '; legendBuf[legendPos++] = ' ';
+        legendPos += AppendLegendTier(legendBuf[legendPos..], '\u25a0', '<', y);
+        legendBuf[legendPos++] = ' '; legendBuf[legendPos++] = ' ';
+        legendPos += AppendLegendTier(legendBuf[legendPos..], '\u25a0', '<', r);
+        legendBuf[legendPos++] = ' '; legendBuf[legendPos++] = ' ';
+        // ">R ms" part
+        legendBuf[legendPos++] = '\u25a0';
+        legendBuf[legendPos++] = '>';
+        legendPos += FormatThresholdValue(legendBuf[legendPos..], r);
+        legendBuf[legendPos++] = 'm'; legendBuf[legendPos++] = 's';
+
+        int legendWidth = legendPos; // display width == char count (all ASCII/narrow)
 
         int consoleWidth = Console.WindowWidth;
-        int chartWidth   = consoleWidth - LegendWidth;
+        int chartWidth   = consoleWidth - legendWidth;
         if (chartWidth < 4)
         {
             _writer.EraseEol();
@@ -256,8 +281,6 @@ internal sealed class MtrAnsiRenderer
         }
 
         // ── append one sample per new ping ────────────────────────────────────
-        // Gate on Sent count changing so we add exactly one entry per probe cycle,
-        // not once per render frame (which fires more frequently).
         if (!double.IsNaN(destLast) && destSent != _latencyLastSent)
         {
             _latencyHistory[_latencyHead] = destLast;
@@ -267,7 +290,6 @@ internal sealed class MtrAnsiRenderer
         }
 
         // ── build the visible window (oldest → newest, left → right) ──────────
-        // Show the most-recent min(chartWidth, _latencyCount) samples.
         int visible = Math.Min(chartWidth, _latencyCount);
 
         // ── adaptive vertical scale over visible window ────────────────────────
@@ -277,7 +299,6 @@ internal sealed class MtrAnsiRenderer
             int idx = (_latencyHead - visible + i + LatencyHistorySize) % LatencyHistorySize;
             if (_latencyHistory[idx] > winMax) winMax = _latencyHistory[idx];
         }
-        // Add 20% headroom so the tallest bar never clips at the top.
         double scaleMax = Math.Max(10.0, winMax * 1.20);
 
         // ── draw empty (future) columns on the left ────────────────────────────
@@ -298,17 +319,15 @@ internal sealed class MtrAnsiRenderer
             int idx = (_latencyHead - visible + i + LatencyHistorySize) % LatencyHistorySize;
             double rtt = _latencyHistory[idx];
 
-            // Pick block character: 0 → ▁, 7 → █
             int level = (int)Math.Round(rtt / scaleMax * 7.0);
-            level      = Math.Clamp(level, 0, 7);
-            colBuf[0]  = BarBlocks[level];
+            level     = Math.Clamp(level, 0, 7);
+            colBuf[0] = BarBlocks[level];
 
-            // Color by threshold tier
-            if      (rtt <=  10.0) _writer.Green();
-            else if (rtt <=  50.0) _writer.Cyan();
-            else if (rtt <= 150.0) _writer.Yellow();
-            else if (rtt <= 300.0) _writer.Red();
-            else                   _writer.Magenta();
+            if      (rtt <  g) _writer.Green();
+            else if (rtt <  c) _writer.Cyan();
+            else if (rtt <  y) _writer.Yellow();
+            else if (rtt <  r) _writer.Red();
+            else               _writer.Magenta();
 
             _writer.WriteFixed(colBuf, 1, rightAlign: false);
         }
@@ -316,20 +335,58 @@ internal sealed class MtrAnsiRenderer
         _writer.Reset();
 
         // ── legend ─────────────────────────────────────────────────────────────
+        ReadOnlySpan<char> legendSpan = legendBuf[..legendPos];
+        // Write " ■<G" in green, "  ■<C" in cyan, etc. — re-render with colors.
         _writer.Write(" ");
-        _writer.Green();   _writer.Write("\u25a0\u226410");
+        _writer.Green();   WriteThresholdLabel('\u25a0', '<', g);
         _writer.Reset();   _writer.Write("  ");
-        _writer.Cyan();    _writer.Write("\u25a0\u226450");
+        _writer.Cyan();    WriteThresholdLabel('\u25a0', '<', c);
         _writer.Reset();   _writer.Write("  ");
-        _writer.Yellow();  _writer.Write("\u25a0\u2264150");
+        _writer.Yellow();  WriteThresholdLabel('\u25a0', '<', y);
         _writer.Reset();   _writer.Write("  ");
-        _writer.Red();     _writer.Write("\u25a0\u2264300");
+        _writer.Red();     WriteThresholdLabel('\u25a0', '<', r);
         _writer.Reset();   _writer.Write("  ");
-        _writer.Magenta(); _writer.Write("\u25a0>300ms");
+        _writer.Magenta(); WriteThresholdLabel('\u25a0', '>', r); _writer.Write("ms");
         _writer.Reset();
+
+        _ = legendSpan; // suppress unused warning
 
         _writer.EraseEol();
         _writer.NewLine();
+    }
+
+    // Appends "■<NNN" (or "■>NNN") into dest and returns chars written.
+    private static int AppendLegendTier(Span<char> dest, char symbol, char op, double value)
+    {
+        int pos = 0;
+        dest[pos++] = symbol;
+        dest[pos++] = op;
+        pos += FormatThresholdValue(dest[pos..], value);
+        return pos;
+    }
+
+    // Formats a threshold value: integer if whole, else one decimal place.
+    private static int FormatThresholdValue(Span<char> dest, double value)
+    {
+        if (value == Math.Floor(value))
+        {
+            int iv = (int)value;
+            iv.TryFormat(dest, out int w);
+            return w;
+        }
+        value.TryFormat(dest, out int written, "F1");
+        return written;
+    }
+
+    // Writes a colored threshold label (e.g. "■<5") directly to the frame buffer.
+    private void WriteThresholdLabel(char symbol, char op, double value)
+    {
+        Span<char> buf = stackalloc char[16];
+        int pos = 0;
+        buf[pos++] = symbol;
+        buf[pos++] = op;
+        pos += FormatThresholdValue(buf[pos..], value);
+        _writer.WriteFixed(buf[..pos], pos, rightAlign: false);
     }
 
     // Format matches MTR: "ddd MMM  d HH:mm:ss yyyy"  (single-digit day gets extra space).

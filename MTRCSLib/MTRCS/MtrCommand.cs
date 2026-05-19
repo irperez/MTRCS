@@ -28,7 +28,11 @@ internal sealed class MtrCommand
         double warnLoss,
         double critLoss,
         double warnRtt,
-        double critRtt)
+        double critRtt,
+        double graphGreen,
+        double graphCyan,
+        double graphYellow,
+        double graphRed)
     {
         internal string  Host         { get; } = host;
         internal int     MaxHops      { get; } = maxHops;
@@ -47,14 +51,22 @@ internal sealed class MtrCommand
         internal double  CritLoss     { get; } = critLoss;
         internal double  WarnRtt      { get; } = warnRtt;
         internal double  CritRtt      { get; } = critRtt;
+        internal double  GraphGreen   { get; } = graphGreen;
+        internal double  GraphCyan    { get; } = graphCyan;
+        internal double  GraphYellow  { get; } = graphYellow;
+        internal double  GraphRed     { get; } = graphRed;
 
         /// <summary>Builds the <see cref="RttThresholds"/> from CLI settings.</summary>
         internal RttThresholds BuildThresholds() => new()
         {
-            WarnLoss = WarnLoss > 0 ? WarnLoss : RttThresholds.Default.WarnLoss,
-            CritLoss = CritLoss > 0 ? CritLoss : RttThresholds.Default.CritLoss,
-            WarnRtt  = WarnRtt,
-            CritRtt  = CritRtt,
+            WarnLoss    = WarnLoss    > 0 ? WarnLoss    : RttThresholds.Default.WarnLoss,
+            CritLoss    = CritLoss    > 0 ? CritLoss    : RttThresholds.Default.CritLoss,
+            WarnRtt     = WarnRtt,
+            CritRtt     = CritRtt,
+            GraphGreen  = GraphGreen  > 0 ? GraphGreen  : RttThresholds.Default.GraphGreen,
+            GraphCyan   = GraphCyan   > 0 ? GraphCyan   : RttThresholds.Default.GraphCyan,
+            GraphYellow = GraphYellow > 0 ? GraphYellow : RttThresholds.Default.GraphYellow,
+            GraphRed    = GraphRed    > 0 ? GraphRed    : RttThresholds.Default.GraphRed,
         };
 
         /// <summary>Returns <see langword="null"/> if valid; otherwise an error message.</summary>
@@ -88,6 +100,14 @@ internal sealed class MtrCommand
                 return "--warn-rtt must be non-negative.";
             if (CritRtt < 0)
                 return "--crit-rtt must be non-negative.";
+            if (GraphGreen < 0)
+                return "--graph-green must be non-negative.";
+            if (GraphCyan < 0)
+                return "--graph-cyan must be non-negative.";
+            if (GraphYellow < 0)
+                return "--graph-yellow must be non-negative.";
+            if (GraphRed < 0)
+                return "--graph-red must be non-negative.";
             return null;
         }
     }

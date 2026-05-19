@@ -41,11 +41,21 @@ internal static class CliParser
           -h, --help          Show this help.
               --version       Show version.
 
+        GRAPH COLORS
+          The header latency bar chart uses five color tiers (green → cyan → yellow → red → magenta).
+          Each threshold is the exclusive upper bound for that tier (ms).
+
+              --graph-green   RTT below which bars are green.  Default: {RttThresholds.Default.GraphGreen}
+              --graph-cyan    RTT below which bars are cyan.   Default: {RttThresholds.Default.GraphCyan}
+              --graph-yellow  RTT below which bars are yellow. Default: {RttThresholds.Default.GraphYellow}
+              --graph-red     RTT below which bars are red; above is magenta. Default: {RttThresholds.Default.GraphRed}
+
         EXAMPLES
           {AppName} example.com
           {AppName} 8.8.8.8 --max-hops 20 --interval 500
           {AppName} example.com --report --cycles 10 --output report.txt
           {AppName} example.com --warn-rtt 50 --crit-rtt 150 --crit-loss 5
+          {AppName} example.com --graph-green 10 --graph-cyan 30 --graph-yellow 60 --graph-red 100
         """;
 
     /// <summary>
@@ -76,6 +86,10 @@ internal static class CliParser
         double critLoss = 0.0;
         double warnRtt  = 0.0;
         double critRtt  = 0.0;
+        double graphGreen  = 0.0;
+        double graphCyan   = 0.0;
+        double graphYellow = 0.0;
+        double graphRed    = 0.0;
 
         for (int i = 0; i < args.Length; i++)
         {
@@ -167,6 +181,22 @@ internal static class CliParser
                     if (!TryNextDouble(args, ref i, arg, out critRtt, out string? errCR)) return ParseResult.Fail(errCR!);
                     break;
 
+                case "--graph-green":
+                    if (!TryNextDouble(args, ref i, arg, out graphGreen, out string? errGG)) return ParseResult.Fail(errGG!);
+                    break;
+
+                case "--graph-cyan":
+                    if (!TryNextDouble(args, ref i, arg, out graphCyan, out string? errGC)) return ParseResult.Fail(errGC!);
+                    break;
+
+                case "--graph-yellow":
+                    if (!TryNextDouble(args, ref i, arg, out graphYellow, out string? errGY)) return ParseResult.Fail(errGY!);
+                    break;
+
+                case "--graph-red":
+                    if (!TryNextDouble(args, ref i, arg, out graphRed, out string? errGR)) return ParseResult.Fail(errGR!);
+                    break;
+
                 default:
                     if (arg.StartsWith('-'))
                         return ParseResult.Fail($"Unknown option: {arg}");
@@ -186,7 +216,8 @@ internal static class CliParser
             host, maxHops, intervalMs, timeoutMs, payloadBytes,
             report, reportCycles, showAsn, useTcp, useUdp, port,
             outputPath, outputFormat,
-            warnLoss, critLoss, warnRtt, critRtt);
+            warnLoss, critLoss, warnRtt, critRtt,
+            graphGreen, graphCyan, graphYellow, graphRed);
 
         string? validationError = settings.Validate();
         return validationError is null
