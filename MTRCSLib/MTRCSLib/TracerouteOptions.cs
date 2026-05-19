@@ -40,6 +40,14 @@ public readonly struct TracerouteOptions
     /// <summary>When <see langword="true"/>, the session resolves ASN info for each hop via Team Cymru DNS.</summary>
     public bool EnableAsn { get; }
 
+    /// <summary>
+    /// When <see langword="true"/> (the default), one silent warmup probe cycle is fired
+    /// before statistics are recorded.  The first real-world ping is almost always inflated
+    /// due to cold ARP/routing/socket caches; discarding it keeps charts and averages clean.
+    /// Set to <see langword="false"/> to include the first ping in all charts and statistics.
+    /// </summary>
+    public bool WarmupPing { get; }
+
     /// <summary>Probe protocol: ICMP (default), TCP SYN (-T), or UDP (-u).</summary>
     public ProbeMode Mode { get; }
 
@@ -58,7 +66,8 @@ public readonly struct TracerouteOptions
         int payloadBytes,
         bool enableAsn,
         ProbeMode mode,
-        int port)
+        int port,
+        bool warmupPing)
     {
         Target = target;
         Host = host;
@@ -69,6 +78,7 @@ public readonly struct TracerouteOptions
         EnableAsn = enableAsn;
         Mode = mode;
         Port = port;
+        WarmupPing = warmupPing;
     }
 
     /// <summary>
@@ -83,7 +93,8 @@ public readonly struct TracerouteOptions
         int payloadBytes = DefaultPayloadBytes,
         bool enableAsn = false,
         ProbeMode mode = ProbeMode.Icmp,
-        int port = 0)
+        int port = 0,
+        bool warmupPing = true)
     {
         ArgumentNullException.ThrowIfNull(target);
         ArgumentNullException.ThrowIfNull(host);
@@ -109,7 +120,7 @@ public readonly struct TracerouteOptions
             _ => 0,
         };
 
-        return new TracerouteOptions(target, host, maxHops, intervalMs, timeoutMs, payloadBytes, enableAsn, mode, resolvedPort);
+        return new TracerouteOptions(target, host, maxHops, intervalMs, timeoutMs, payloadBytes, enableAsn, mode, resolvedPort, warmupPing);
     }
 
     /// <summary>
@@ -126,6 +137,7 @@ public readonly struct TracerouteOptions
         bool enableAsn = false,
         ProbeMode mode = ProbeMode.Icmp,
         int port = 0,
+        bool warmupPing = true,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(host);
@@ -135,7 +147,7 @@ public readonly struct TracerouteOptions
         {
             if (!NetworkUtils.IsIPv4(parsed))
                 throw new ArgumentException("Only IPv4 targets are supported.", nameof(host));
-            return Create(parsed, host, maxHops, intervalMs, timeoutMs, payloadBytes, enableAsn, mode, port);
+            return Create(parsed, host, maxHops, intervalMs, timeoutMs, payloadBytes, enableAsn, mode, port, warmupPing);
         }
 
         IPAddress[] addresses = await Dns.GetHostAddressesAsync(host, System.Net.Sockets.AddressFamily.InterNetwork, cancellationToken).ConfigureAwait(false);
@@ -143,6 +155,6 @@ public readonly struct TracerouteOptions
         if (addresses.Length == 0)
             throw new InvalidOperationException($"No IPv4 address found for host '{host}'.");
 
-        return Create(addresses[0], host, maxHops, intervalMs, timeoutMs, payloadBytes, enableAsn, mode, port);
+        return Create(addresses[0], host, maxHops, intervalMs, timeoutMs, payloadBytes, enableAsn, mode, port, warmupPing);
     }
 }

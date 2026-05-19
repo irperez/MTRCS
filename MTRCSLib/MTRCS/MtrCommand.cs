@@ -32,29 +32,38 @@ internal sealed class MtrCommand
         double graphGreen,
         double graphCyan,
         double graphYellow,
-        double graphRed)
+        double graphRed,
+        bool includeFirstPing = false)
     {
-        internal string  Host         { get; } = host;
-        internal int     MaxHops      { get; } = maxHops;
-        internal int     IntervalMs   { get; } = intervalMs;
-        internal int     TimeoutMs    { get; } = timeoutMs;
-        internal int     PayloadBytes { get; } = payloadBytes;
-        internal bool    Report       { get; } = report;
-        internal int     ReportCycles { get; } = reportCycles;
-        internal bool    ShowAsn      { get; } = showAsn;
-        internal bool    UseTcp       { get; } = useTcp;
-        internal bool    UseUdp       { get; } = useUdp;
-        internal int     Port         { get; } = port;
-        internal string? OutputPath   { get; } = outputPath;
-        internal string  OutputFormat { get; } = outputFormat;
-        internal double  WarnLoss     { get; } = warnLoss;
-        internal double  CritLoss     { get; } = critLoss;
-        internal double  WarnRtt      { get; } = warnRtt;
-        internal double  CritRtt      { get; } = critRtt;
-        internal double  GraphGreen   { get; } = graphGreen;
-        internal double  GraphCyan    { get; } = graphCyan;
-        internal double  GraphYellow  { get; } = graphYellow;
-        internal double  GraphRed     { get; } = graphRed;
+        internal string  Host            { get; } = host;
+        internal int     MaxHops         { get; } = maxHops;
+        internal int     IntervalMs      { get; } = intervalMs;
+        internal int     TimeoutMs       { get; } = timeoutMs;
+        internal int     PayloadBytes    { get; } = payloadBytes;
+        internal bool    Report          { get; } = report;
+        internal int     ReportCycles    { get; } = reportCycles;
+        internal bool    ShowAsn         { get; } = showAsn;
+        internal bool    UseTcp          { get; } = useTcp;
+        internal bool    UseUdp          { get; } = useUdp;
+        internal int     Port            { get; } = port;
+        internal string? OutputPath      { get; } = outputPath;
+        internal string  OutputFormat    { get; } = outputFormat;
+        internal double  WarnLoss        { get; } = warnLoss;
+        internal double  CritLoss        { get; } = critLoss;
+        internal double  WarnRtt         { get; } = warnRtt;
+        internal double  CritRtt         { get; } = critRtt;
+        internal double  GraphGreen      { get; } = graphGreen;
+        internal double  GraphCyan       { get; } = graphCyan;
+        internal double  GraphYellow     { get; } = graphYellow;
+        internal double  GraphRed        { get; } = graphRed;
+
+        /// <summary>
+        /// When <see langword="true"/>, the warmup cycle is skipped and the first probe's
+        /// RTT is included in all charts and statistics.  Useful for capturing cold-path
+        /// latency or when a single fast measurement matters.
+        /// Corresponds to the <c>--no-warmup</c> CLI flag.
+        /// </summary>
+        internal bool    IncludeFirstPing { get; } = includeFirstPing;
 
         /// <summary>Builds the <see cref="RttThresholds"/> from CLI settings.</summary>
         internal RttThresholds BuildThresholds() => new()
@@ -134,7 +143,8 @@ internal sealed class MtrCommand
                 settings.PayloadBytes,
                 settings.ShowAsn,
                 mode,
-                settings.Port).ConfigureAwait(false);
+                settings.Port,
+                warmupPing: !settings.IncludeFirstPing).ConfigureAwait(false);
         }
         catch (Exception ex)
         {

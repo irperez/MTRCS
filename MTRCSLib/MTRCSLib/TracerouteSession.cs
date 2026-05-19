@@ -141,6 +141,12 @@ public sealed class TracerouteSession : ITracerouteSession
 
     private async Task RunProbeLoopAsync(CancellationToken ct)
     {
+        // Run one silent warmup cycle to prime ARP/routing/socket caches.
+        // The first real ping is always inflated; discarding it keeps the charts clean.
+        // This behaviour can be disabled via TracerouteOptions.WarmupPing = false.
+        if (Options.WarmupPing)
+            await RunOneCycleAsync(ct, warmup: true).ConfigureAwait(false);
+
         while (!ct.IsCancellationRequested)
         {
             long cycleStart = Environment.TickCount64;
@@ -163,7 +169,7 @@ public sealed class TracerouteSession : ITracerouteSession
         }
     }
 
-    private async Task RunOneCycleAsync(CancellationToken ct)
+    private async Task RunOneCycleAsync(CancellationToken ct, bool warmup = false)
     {
         using IPinger pinger = _pingerFactory.Create();
 
@@ -182,7 +188,7 @@ public sealed class TracerouteSession : ITracerouteSession
         for (int ttl = 1; ttl <= hopCount; ttl++)
         {
             ushort seq = unchecked(_sequence++);
-            ProbeResult result = await ProbeHopAsync(pinger, ttl, seq, ct).ConfigureAwait(false);
+            ProbeResult result = await ProbeHopAsync(pinger, ttl, seq, ct, warmup).ConfigureAwait(false);
 
             if (result.Status == PingStatus.Success)
             {
@@ -204,7 +210,7 @@ public sealed class TracerouteSession : ITracerouteSession
             Volatile.Write(ref _activeHopCount, newActiveHops);
     }
 
-    private async Task<ProbeResult> ProbeHopAsync(IPinger pinger, int ttl, ushort seq, CancellationToken ct)
+    private async Task<ProbeResult> ProbeHopAsync(IPinger pinger, int ttl, ushort seq, CancellationToken ct, bool warmup = false)
     {
         ProbeResult result = await pinger.SendProbeAsync(
             Options.Target,
@@ -213,6 +219,9 @@ public sealed class TracerouteSession : ITracerouteSession
             Options.TimeoutMs,
             Options.PayloadBytes,
             ct).ConfigureAwait(false);
+
+        // Warmup cycle: discard RTT data so cold-start latency doesn't pollute metrics.
+        if (warmup) return result;
 
         int hopIndex = ttl - 1;
 

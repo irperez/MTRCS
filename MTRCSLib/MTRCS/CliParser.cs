@@ -38,6 +38,9 @@ internal static class CliParser
               --crit-loss     Loss% threshold for red highlight. Default: 10
               --warn-rtt      Avg RTT (ms) threshold for yellow highlight. Default: 0 (off)
               --crit-rtt      Avg RTT (ms) threshold for red highlight. Default: 0 (off)
+              --no-warmup     Include the first ping in charts and statistics.
+                              By default a silent warmup cycle discards the inflated
+                              cold-start RTT caused by ARP/routing cache misses.
           -h, --help          Show this help.
               --version       Show version.
 
@@ -56,6 +59,7 @@ internal static class CliParser
           {AppName} example.com --report --cycles 10 --output report.txt
           {AppName} example.com --warn-rtt 50 --crit-rtt 150 --crit-loss 5
           {AppName} example.com --graph-green 10 --graph-cyan 30 --graph-yellow 60 --graph-red 100
+          {AppName} example.com --no-warmup
         """;
 
     /// <summary>
@@ -90,6 +94,7 @@ internal static class CliParser
         double graphCyan   = 0.0;
         double graphYellow = 0.0;
         double graphRed    = 0.0;
+        bool includeFirstPing = false;
 
         for (int i = 0; i < args.Length; i++)
         {
@@ -197,6 +202,10 @@ internal static class CliParser
                     if (!TryNextDouble(args, ref i, arg, out graphRed, out string? errGR)) return ParseResult.Fail(errGR!);
                     break;
 
+                case "--no-warmup":
+                    includeFirstPing = true;
+                    break;
+
                 default:
                     if (arg.StartsWith('-'))
                         return ParseResult.Fail($"Unknown option: {arg}");
@@ -217,7 +226,8 @@ internal static class CliParser
             report, reportCycles, showAsn, useTcp, useUdp, port,
             outputPath, outputFormat,
             warnLoss, critLoss, warnRtt, critRtt,
-            graphGreen, graphCyan, graphYellow, graphRed);
+            graphGreen, graphCyan, graphYellow, graphRed,
+            includeFirstPing);
 
         string? validationError = settings.Validate();
         return validationError is null
