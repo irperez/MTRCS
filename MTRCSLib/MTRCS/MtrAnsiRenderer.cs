@@ -87,6 +87,10 @@ internal sealed class MtrAnsiRenderer
     // ── frame writer ──────────────────────────────────────────────────────────
     private readonly AnsiWriter _writer;
 
+    // ── spinner ───────────────────────────────────────────────────────────────
+    private static ReadOnlySpan<char> SpinnerFrames => "⠉⠘⠰⢠⣀⡄⠆⠃";
+    private int _spinnerIndex;
+
     internal MtrAnsiRenderer(TracerouteOptions options, RttThresholds thresholds = default)
     {
         int maxHops = options.MaxHops;
@@ -157,7 +161,7 @@ internal sealed class MtrAnsiRenderer
         // ── title + start timestamp ────────────────────────────────────────────
         _writer.WriteRaw(_titleBytes);
         _writer.EraseEol();         // clear stale chars before jumping to timestamp position
-        WriteTitleTimestamp();
+        WriteTitleTimestamp(count > 0);
         _writer.NewLine();
 
         // ── keys bar ──────────────────────────────────────────────────────────
@@ -204,20 +208,42 @@ internal sealed class MtrAnsiRenderer
 
     // Writes the start timestamp right-justified on the current line.
     // Format matches MTR: "ddd MMM  d HH:mm:ss yyyy"  (single-digit day gets extra space).
-    private void WriteTitleTimestamp()
+    // When isActive is true, a spinning ASCII animation is drawn to the left of the timestamp.
+    private void WriteTitleTimestamp(bool isActive)
     {
         // Format: "Wed Dec  9 03:07:34 2020"
         Span<char> buf = stackalloc char[32];
         bool ok = _startedAt.TryFormat(buf, out int written, "ddd MMM  d HH:mm:ss yyyy");
         ReadOnlySpan<char> stamp = ok ? buf[..written] : _startedAt.ToString("ddd MMM  d HH:mm:ss yyyy").AsSpan();
 
-        // Use a cursor-position move to right-align: ESC[{col}G where col = consoleWidth - stamp.Length + 1.
-        int consoleWidth = Console.WindowWidth;
-        if (consoleWidth <= stamp.Length) return;   // terminal too narrow — skip
+        // spinner is 1 char + 1 space gap before the timestamp
+        const int spinnerWidth = 2; // char + space
+        int totalWidth = stamp.Length + spinnerWidth;
 
-        int col = consoleWidth - stamp.Length + 1;  // 1-based column
-        _writer.Grey();
+        // Use a cursor-position move to right-align: ESC[{col}G where col = consoleWidth - totalWidth + 1.
+        int consoleWidth = Console.WindowWidth;
+        if (consoleWidth <= totalWidth) return;   // terminal too narrow — skip
+
+        int col = consoleWidth - totalWidth + 1;  // 1-based column of spinner
         _writer.MoveCursorToColumn(col);
+
+        if (isActive)
+        {
+            _writer.Cyan();
+            Span<char> spinBuf = stackalloc char[1];
+            spinBuf[0] = SpinnerFrames[_spinnerIndex];
+            _spinnerIndex = (_spinnerIndex + 1) % SpinnerFrames.Length;
+            _writer.WriteFixed(spinBuf, 1, rightAlign: false);
+            _writer.Reset();
+        }
+        else
+        {
+            // Hide spinner with a space when not pinging.
+            _writer.WriteFixed(" ".AsSpan(), 1, rightAlign: false);
+        }
+
+        _writer.Write(" ");
+        _writer.Grey();
         _writer.WriteFixed(stamp, stamp.Length, rightAlign: false);
         _writer.Reset();
     }
