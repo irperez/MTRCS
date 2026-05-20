@@ -28,20 +28,44 @@
 
 ## 🖥️ Live Demo
 
-```
-mtrcs v1.0.0 — Tracing to google.com (142.250.80.46)
+The live view is a full-screen terminal UI that updates ~10 times per second. Here is what it looks like in practice:
 
-HOST                                       Loss%    Snt    Last     Avg    Best    Wrst   StDev  Jitter
- 1. router.local (192.168.1.1)               0.0%    42     1.2     1.3     0.9     2.1     0.3     0.2
- 2. 100.64.0.1                               0.0%    42     8.4     8.7     7.8     9.2     0.4     0.3
- 3. 10.58.224.1                              0.0%    42    11.3    11.6    10.9    13.1     0.5     0.4
- 4. 72.14.215.85                             0.0%    42    14.2    14.5    13.8    16.0     0.6     0.5
- 5. 108.170.246.33                           0.0%    42    15.1    15.3    14.9    16.2     0.3     0.2
- 6. 142.250.57.197                           0.0%    42    15.8    16.0    15.3    17.4     0.5     0.4
- 7. lax17s55-in-f14.1e100.net (142.250.80.46)  0.0%  42   16.1    16.3    15.8    17.9     0.4     0.3
+```
+mtrcs  google.com (142.250.191.14)                          ⠘  Tue May 19 22:01:54 2026
+Keys:  r=Restart statistics   q=quit
+▁▂▁▂▁▂▃▂▁▂▁▃▂▁▂▁▃▂▁▂▁▂▃▁▂▁▂▁▃▂▁▂▁▂▃▂▁▂▁▂▁▃▂▁▂▁▂▃▂▁▂▁    ■<5  ■<15  ■<30  ■<50  ■>50ms
+
+                          Packets                          Pings
+HOST                       Loss%    Snt    Last     Avg    Best    Wrst   StDev  Jitter  Graph
+ 1. 10.101.10.1              0.0      9     0.9     0.7     0.4     1.1     0.2     0.0  ▃▂▃▂▃▃▂▃
+ 2. 192.168.1.1              0.0      9     0.6     0.7     0.5     1.0     0.2     0.2  ▂▂▂▂▂▂▂▂
+ 3. lo0-100.CMDNNJ-VFTTP-... (71.245.114.1)
+                             0.0      9     2.7    10.1     1.2    72.3    23.3     0.7  ▂▄▇▂▃▅▂▃
+ 4. 100.41.63.96             0.0      9     7.2     6.1     5.0     7.5     0.9     2.0  ▃▃▂▃▃▂▃▃
+ 5. ???                    100.0      8     ???     ???     ???     ???     ???     ???  –
+ 6. customer.alter.net (204.148.5.98)
+                            12.5      8     6.5     6.1     5.5     6.5     0.4     0.7  ▃▃▃▃▂▃▃▃
+ 7. 172.108.217.21           0.0      8     6.1     6.0     5.3     6.4     0.4     0.3  ▃▂▃▃▃▂▃▃
+ 8. 108.170.235.133          0.0      8     6.2     6.1     5.3     6.6     0.5     0.2  ▂▃▃▂▃▃▂▃
+ 9. pnlgaa-az-in-f14.1e... (142.250.191.14)
+                             0.0      8     6.0     5.1     5.0     6.0     0.4     1.0  ▂▂▃▂▂▃▂▂
 ```
 
-*Press `Ctrl+C` to exit. The display refreshes ~10×/sec for real-time visibility.*
+**UI anatomy:**
+
+| Area | Description |
+|------|-------------|
+| **Title line** | `mtrcs  <host> (<resolved IP>)` on the left; spinner (`⠉⠘⠰⢠⣀⡄⠆⠃`) + live clock (`Tue May 19 22:01:54 2026`) on the right |
+| **Keys bar** | Keyboard shortcuts — `r` restarts statistics, `q` quits |
+| **Header graph** | Full-width scrolling latency bar chart for the destination hop; color-coded by RTT tier with legend |
+| **Color legend** | `■<5  ■<15  ■<30  ■<50  ■>50ms` — thresholds match `--graph-green/cyan/yellow/red` defaults; customizable |
+| **Column headers** | `Packets` group (Loss%, Snt) and `Pings` group (Last, Avg, Best, Wrst, StDev, Jitter, Graph) |
+| **Per-hop rows** | One row per TTL; long hostnames are truncated with `...` |
+| **Graph column** | 8-column Unicode sparkline (▁▂▃▄▅▆▇█) showing the rolling RTT history for that hop |
+| **Loss highlight** | Loss% is shown in **red** when at or above `--crit-loss` (default 10%), **yellow** at `--warn-loss` (default 1%) |
+| **`???` hops** | Hops that return no ICMP response — Loss% shown in red, RTT columns display `???` |
+
+*Press `Ctrl+C` or `q` to exit. The display refreshes ~10×/sec for real-time visibility.*
 
 ---
 
@@ -59,6 +83,12 @@ HOST                                       Loss%    Snt    Last     Avg    Best 
 | 🎨 **Rich ANSI UI** | Color-coded RTT/loss, alternate screen buffer, zero flicker |
 | 🔬 **Precise stats** | Welford online algorithm for numerically stable mean/stdev |
 | 📦 **Self-contained** | No install — just download and run |
+| 6️⃣ **IPv6 support** | Prefer IPv6 when resolving hostnames (`-6`/`--ipv6`) |
+| 📈 **Percentiles** | Optional P95 and P99 RTT columns (`--percentiles`) |
+| 🎚️ **Alert thresholds** | Configurable warn/crit colors for loss % and avg RTT |
+| 🎨 **Graph color tiers** | Fully customizable latency bar-chart color thresholds |
+| 🔇 **Warmup control** | Silent first-cycle warmup discards cold-start RTT by default (`--no-warmup` to disable) |
+| 🏷️ **DSCP/QoS tagging** | Set DSCP value in probe packets for QoS path verification (`--dscp`) |
 
 ---
 
@@ -217,7 +247,7 @@ mtrcs google.com --report --output results.json --format json
 
 | Option | Short | Default | Description |
 |--------|-------|---------|-------------|
-| `<host>` | — | *(required)* | Hostname or IPv4 address to trace |
+| `<host>` | — | *(required)* | Hostname, IPv4, or IPv6 address to trace |
 | `--max-hops` | `-m` | `30` | Maximum TTL hops (1–255) |
 | `--interval` | `-i` | `1000` | Probe cycle interval in milliseconds |
 | `--timeout` | `-t` | `800` | Per-probe timeout in milliseconds |
@@ -227,9 +257,21 @@ mtrcs google.com --report --output results.json --format json
 | `--asn` | `-a` | `false` | Show ASN column (Team Cymru DNS lookup) |
 | `--tcp` | `-T` | `false` | Use TCP SYN probes instead of ICMP |
 | `--udp` | `-u` | `false` | Use UDP probes instead of ICMP |
+| `--ipv6` | `-6` | `false` | Prefer IPv6 when resolving hostnames (falls back to IPv4) |
 | `--port` | `-P` | `80`/`33434` | Destination port for TCP/UDP probes |
 | `--output` | `-o` | — | File path for report export (requires `--report`) |
 | `--format` | `-f` | `text` | Export format: `text`, `csv`, `json` |
+| `--warn-loss` | — | `1` | Loss % threshold for yellow highlight |
+| `--crit-loss` | — | `10` | Loss % threshold for red highlight |
+| `--warn-rtt` | — | `0` (off) | Avg RTT (ms) threshold for yellow highlight |
+| `--crit-rtt` | — | `0` (off) | Avg RTT (ms) threshold for red highlight |
+| `--graph-green` | — | `5` | RTT (ms) below which latency bar chart bars are green |
+| `--graph-cyan` | — | `15` | RTT (ms) below which latency bar chart bars are cyan |
+| `--graph-yellow` | — | `30` | RTT (ms) below which latency bar chart bars are yellow |
+| `--graph-red` | — | `50` | RTT (ms) below which latency bar chart bars are red (above = magenta) |
+| `--no-warmup` | — | `false` | Include the first probe cycle in stats (disables silent cold-start warmup) |
+| `--percentiles` | — | `false` | Show P95 and P99 RTT columns in the live view and reports |
+| `--dscp` | — | `0` | Set DSCP value (0–63) in probe packets for QoS path verification |
 | `--version` | — | — | Show version and exit |
 | `--help` | `-h` | — | Show help and exit |
 
@@ -238,14 +280,25 @@ mtrcs google.com --report --output results.json --format json
 ## 📊 Understanding the Output
 
 ```
-HOST                                       Loss%    Snt    Last     Avg    Best    Wrst   StDev  Jitter
- 1. router.local (192.168.1.1)               0.0%    42     1.2     1.3     0.9     2.1     0.3     0.2
+mtrcs  google.com (142.250.191.14)                          ⠘  Tue May 19 22:01:54 2026
+Keys:  r=Restart statistics   q=quit
+▁▂▁▂▁▂▃▂▁▂▁▃▂▁▂▁▃▂▁▂▁▂▃▁▂▁▂▁▃▂▁▂▁▂▃▂▁▂▁▂▁▃▂▁▂▁▂▃▂▁▂▁    ■<5  ■<15  ■<30  ■<50  ■>50ms
+
+                          Packets                          Pings
+HOST                       Loss%    Snt    Last     Avg    Best    Wrst   StDev  Jitter  Graph
+ 1. 10.101.10.1              0.0      9     0.9     0.7     0.4     1.1     0.2     0.0  ▃▂▃▂▃▃▂▃
+ 2. 192.168.1.1              0.0      9     0.6     0.7     0.5     1.0     0.2     0.2  ▂▂▂▂▂▂▂▂
+ 5. ???                    100.0      8     ???     ???     ???     ???     ???     ???  –
+ 6. customer.alter.net (204.148.5.98)
+                            12.5      8     6.5     6.1     5.5     6.5     0.4     0.7  ▃▃▃▃▂▃▃▃
 ```
+
+### Column reference
 
 | Column | Meaning |
 |--------|---------|
-| **HOST** | Hop number, reverse-DNS hostname, and IP address |
-| **Loss%** | Percentage of probes that received no response |
+| **HOST** | Hop number, reverse-DNS hostname, and IP address; long names are truncated with `…` |
+| **Loss%** | Percentage of probes that received no response; yellow at `--warn-loss`, red at `--crit-loss` |
 | **Snt** | Total probes sent to this hop |
 | **Last** | RTT of the most recent probe (ms) |
 | **Avg** | Running arithmetic mean of all RTT samples (ms) |
@@ -253,14 +306,35 @@ HOST                                       Loss%    Snt    Last     Avg    Best 
 | **Wrst** | Maximum RTT ever observed (ms) |
 | **StDev** | Standard deviation of RTT — indicates jitter/instability (ms) |
 | **Jitter** | Absolute difference between the last two RTT samples (ms) |
-| **ASN** | Autonomous System Number and name (with `--asn`) |
+| **Graph** | 8-column rolling sparkline (▁▂▃▄▅▆▇█) — each bar represents one ping cycle; taller = higher RTT |
+| **P95 / P99** | 95th and 99th percentile RTT columns, shown when `--percentiles` is passed |
+| **ASN** | Autonomous System Number and name, shown when `--asn` is passed |
 
-### Reading the Numbers
+### Header latency graph
+
+The third line is a full-width scrolling bar chart for the **destination hop**. One column is appended per ping cycle and the chart scrolls left as new data arrives. Columns are color-coded by RTT tier:
+
+| Color | Default threshold | Option |
+|-------|------------------|--------|
+| 🟢 Green | < 5 ms | `--graph-green` |
+| 🩵 Cyan | < 15 ms | `--graph-cyan` |
+| 🟡 Yellow | < 30 ms | `--graph-yellow` |
+| 🔴 Red | < 50 ms | `--graph-red` |
+| 🟣 Magenta | ≥ 50 ms | *(above `--graph-red`)* |
+
+The compact legend on the right (`■<5  ■<15  ■<30  ■<50  ■>50ms`) reflects the active threshold values.
+
+### Spinner and clock
+
+The top-right corner shows a **braille spinner** (`⠉⠘⠰⢠⣀⡄⠆⠃`) that ticks every frame to confirm the tool is running, followed by the **live local date and time** (`Tue May 19 22:01:54 2026`). If the spinner freezes, the probe loop has stalled.
+
+### Reading the numbers
 
 - **High Loss% at intermediate hops** — Routers often rate-limit ICMP. If the *final destination* shows 0% loss, intermediate loss is usually benign.
+- **`???` hops** — No successful probe received; Loss% is shown in red and RTT columns display `???`.
 - **High StDev / Wrst** — Indicates bursty congestion or route instability.
 - **Rising Avg over time** — Sustained congestion or a degrading link.
-- **??? in RTT columns** — No successful probes received yet for that hop.
+- **Flat sparkline** — Consistent RTT; a growing or spiking sparkline suggests instability.
 
 ---
 
@@ -303,6 +377,104 @@ mtrcs example.com --udp --port 33434
 ```
 
 > **Note:** `--tcp` and `--udp` are mutually exclusive.
+
+---
+
+## 🌍 IPv6 Support (`--ipv6` / `-6`)
+
+The `--ipv6` flag instructs MTRCS to prefer an IPv6 address when resolving a hostname. If the hostname has no AAAA record, it falls back to IPv4 automatically.
+
+```bash
+mtrcs google.com --ipv6
+mtrcs google.com -6
+```
+
+---
+
+## 📈 Percentiles (`--percentiles`)
+
+Show additional **P95** and **P99** RTT columns in both the live view and exported reports. Useful for spotting tail latency that the average and worst columns can miss.
+
+```bash
+mtrcs google.com --percentiles
+mtrcs google.com --report --cycles 50 --percentiles --output report.json --format json
+```
+
+---
+
+## 🚦 Alert Thresholds
+
+Color-code the **Loss%** and **Avg RTT** columns based on configurable warn/crit boundaries.
+
+| Option | Default | Behavior |
+|--------|---------|----------|
+| `--warn-loss <pct>` | `1` | Loss% ≥ value → **yellow** |
+| `--crit-loss <pct>` | `10` | Loss% ≥ value → **red** |
+| `--warn-rtt <ms>` | `0` (off) | Avg RTT ≥ value → **yellow** |
+| `--crit-rtt <ms>` | `0` (off) | Avg RTT ≥ value → **red** |
+
+```bash
+# Highlight hops with >5% loss in red and RTT >150 ms in red
+mtrcs example.com --crit-loss 5 --warn-rtt 50 --crit-rtt 150
+```
+
+---
+
+## 🎨 Graph Color Tiers (`--graph-*`)
+
+The header latency bar chart uses five color tiers (green → cyan → yellow → red → magenta). Each `--graph-*` option sets the **exclusive upper bound** (in ms) for that tier.
+
+| Option | Default | Meaning |
+|--------|---------|---------|
+| `--graph-green <ms>` | `5` | RTT below this → green |
+| `--graph-cyan <ms>` | `15` | RTT below this → cyan |
+| `--graph-yellow <ms>` | `30` | RTT below this → yellow |
+| `--graph-red <ms>` | `50` | RTT below this → red; at or above → magenta |
+
+```bash
+# Tighter thresholds for a low-latency LAN environment
+mtrcs example.com --graph-green 2 --graph-cyan 5 --graph-yellow 15 --graph-red 30
+
+# Looser thresholds for high-latency intercontinental links
+mtrcs example.com --graph-green 30 --graph-cyan 80 --graph-yellow 150 --graph-red 250
+```
+
+---
+
+## 🔇 Warmup Suppression (`--no-warmup`)
+
+By default, MTRCS runs a silent warmup cycle before recording any statistics. This discards the inflated cold-start RTT caused by ARP resolution, routing-cache misses, and OS socket setup, giving you cleaner baselines immediately.
+
+Pass `--no-warmup` to include the very first probe cycle in all charts and statistics:
+
+```bash
+mtrcs example.com --no-warmup
+```
+
+---
+
+## 🏷️ DSCP / QoS Tagging (`--dscp`)
+
+Set the **DSCP** (Differentiated Services Code Point) field (0–63) in outgoing probe packets. This lets you verify that QoS policies are being applied end-to-end and that prioritized traffic follows the expected path.
+
+Common DSCP values:
+
+| Value | Class | Typical use |
+|-------|-------|-------------|
+| `0` | Best Effort (BE) | Default |
+| `8` | CS1 | Background |
+| `46` | EF (Expedited Forwarding) | VoIP / real-time |
+| `34` | AF41 | Video conferencing |
+
+```bash
+# Trace the VoIP traffic path (EF / DSCP 46)
+mtrcs sip.example.com --dscp 46
+
+# Verify best-effort path
+mtrcs example.com --dscp 0
+```
+
+> **Note:** Setting DSCP requires raw socket privileges (same as ICMP mode). The receiving hop may or may not honor or preserve the DSCP marking.
 
 ---
 
@@ -440,12 +612,18 @@ sudo dotnet run --project MTRCS -- google.com
 | Platform | Linux/macOS only | Windows, macOS, Linux, Raspberry Pi |
 | Runtime | C binary | Native AOT binary (no runtime) |
 | Protocol | ICMP, UDP, TCP | ICMP, TCP SYN, UDP |
+| IPv6 support | ✅ | ✅ |
 | Live display | ✅ | ✅ |
 | Report mode | ✅ | ✅ |
 | JSON export | ❌ | ✅ |
 | CSV export | ❌ | ✅ |
 | ASN lookup | ✅ | ✅ (Team Cymru) |
 | Jitter column | ❌ | ✅ |
+| Percentiles (P95/P99) | ❌ | ✅ |
+| Alert thresholds | ❌ | ✅ |
+| Graph color tiers | ❌ | ✅ |
+| Warmup suppression | ❌ | ✅ |
+| DSCP/QoS tagging | ❌ | ✅ |
 | Open source | GPL-2.0 | MIT |
 
 ---
