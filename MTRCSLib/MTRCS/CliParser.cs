@@ -19,7 +19,7 @@ internal static class CliParser
           {AppName} <host> [options]
 
         ARGUMENTS
-          <host>              Hostname or IPv4 address to trace.
+          <host>              Hostname, IPv4 address, or IPv6 address to trace.
 
         OPTIONS
           -m, --max-hops      Maximum TTL hops (1–255). Default: {TracerouteOptions.DefaultMaxHops}
@@ -31,6 +31,7 @@ internal static class CliParser
           -a, --asn           Show ASN column via Team Cymru DNS lookup.
           -T, --tcp           Use TCP SYN probes instead of ICMP.
           -u, --udp           Use UDP probes instead of ICMP.
+          -6, --ipv6          Prefer IPv6 when resolving hostnames (falls back to IPv4).
           -P, --port          Destination port for TCP/UDP probes. Default: 80 (TCP) / 33434 (UDP)
           -o, --output        File path for report export (requires --report).
           -f, --format        Export format: text, csv, json. Default: text
@@ -95,6 +96,7 @@ internal static class CliParser
         double graphYellow = 0.0;
         double graphRed    = 0.0;
         bool includeFirstPing = false;
+        bool preferIPv6 = false;
 
         for (int i = 0; i < args.Length; i++)
         {
@@ -206,6 +208,11 @@ internal static class CliParser
                     includeFirstPing = true;
                     break;
 
+                case "-6":
+                case "--ipv6":
+                    preferIPv6 = true;
+                    break;
+
                 default:
                     if (arg.StartsWith('-'))
                         return ParseResult.Fail($"Unknown option: {arg}");
@@ -227,7 +234,7 @@ internal static class CliParser
             outputPath, outputFormat,
             warnLoss, critLoss, warnRtt, critRtt,
             graphGreen, graphCyan, graphYellow, graphRed,
-            includeFirstPing);
+            includeFirstPing, preferIPv6);
 
         string? validationError = settings.Validate();
         return validationError is null

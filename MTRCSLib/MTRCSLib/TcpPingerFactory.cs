@@ -1,24 +1,27 @@
+using System.Net.Sockets;
 using MTRCSLib.Abstractions;
 
 namespace MTRCSLib;
 
 /// <summary>
 /// <see cref="IPingerFactory"/> that creates <see cref="TcpPinger"/> instances,
-/// all sharing a single <see cref="RawIcmpListener"/> owned by this factory.
+/// all sharing a single <see cref="IRawIcmpListener"/> owned by this factory.
+/// Supports both IPv4 and IPv6 targets.
 /// </summary>
 public sealed class TcpPingerFactory : IPingerFactory, IDisposable
 {
-    private readonly RawIcmpListener _listener;
+    private readonly IRawIcmpListener _listener;
     private readonly int _destPort;
     private bool _disposed;
 
     /// <param name="destPort">TCP destination port (default 80).</param>
-    public TcpPingerFactory(int destPort = 80)
+    /// <param name="addressFamily">Address family of the target; determines ICMPv4 vs ICMPv6 listener.</param>
+    public TcpPingerFactory(int destPort = 80, AddressFamily addressFamily = AddressFamily.InterNetwork)
     {
         if (destPort is < 1 or > 65535)
             throw new ArgumentOutOfRangeException(nameof(destPort), "Must be between 1 and 65535.");
         _destPort = destPort;
-        _listener = new RawIcmpListener();
+        _listener = RawIcmpListenerFactory.Create(addressFamily);
     }
 
     /// <inheritdoc/>

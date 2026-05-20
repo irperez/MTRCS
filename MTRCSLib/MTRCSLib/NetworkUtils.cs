@@ -39,6 +39,12 @@ internal static class NetworkUtils
         address.AddressFamily == AddressFamily.InterNetwork;
 
     /// <summary>
+    /// Returns true if <paramref name="address"/> is an IPv6 address.
+    /// </summary>
+    public static bool IsIPv6(IPAddress address) =>
+        address.AddressFamily == AddressFamily.InterNetworkV6;
+
+    /// <summary>
     /// Writes a minimal ICMP Echo Request payload (header + optional data) into <paramref name="buffer"/>.
     /// Caller must ensure buffer is at least 8 bytes (header only).
     /// Returns the number of bytes written.

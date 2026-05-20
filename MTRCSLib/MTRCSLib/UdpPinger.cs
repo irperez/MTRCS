@@ -11,18 +11,19 @@ namespace MTRCSLib;
 /// Exceeded; the destination responds with ICMP Port Unreachable (type 3,
 /// code 3) when the target port is closed (the MTR/traceroute convention).
 ///
-/// Uses <see cref="RawIcmpListener"/> to receive both types of ICMP reply.
+/// Uses <see cref="IRawIcmpListener"/> to receive both types of ICMP reply.
+/// Supports both IPv4 and IPv6 targets.
 /// </summary>
 internal sealed class UdpPinger : IPinger
 {
-    private readonly RawIcmpListener _listener;
+    private readonly IRawIcmpListener _listener;
     private readonly int _destPort;
     private bool _disposed;
 
     // MTR default destination port for UDP probes.
     internal const int DefaultUdpPort = 33434;
 
-    public UdpPinger(RawIcmpListener listener, int destPort = DefaultUdpPort)
+    public UdpPinger(IRawIcmpListener listener, int destPort = DefaultUdpPort)
     {
         ArgumentNullException.ThrowIfNull(listener);
         _listener = listener;
@@ -41,11 +42,18 @@ internal sealed class UdpPinger : IPinger
         ObjectDisposedException.ThrowIf(_disposed, this);
         ArgumentNullException.ThrowIfNull(target);
 
-        using Socket udp = new(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
-        udp.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.IpTimeToLive, ttl);
+        using Socket udp = new(target.AddressFamily, SocketType.Dgram, ProtocolType.Udp);
+
+        if (target.AddressFamily == AddressFamily.InterNetworkV6)
+            udp.SetSocketOption(SocketOptionLevel.IPv6, SocketOptionName.HopLimit, ttl);
+        else
+            udp.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.IpTimeToLive, ttl);
 
         // Bind to :0 to get an OS-assigned ephemeral port.
-        udp.Bind(new IPEndPoint(IPAddress.Any, 0));
+        IPEndPoint localEp = target.AddressFamily == AddressFamily.InterNetworkV6
+            ? new IPEndPoint(IPAddress.IPv6Any, 0)
+            : new IPEndPoint(IPAddress.Any, 0);
+        udp.Bind(localEp);
         ushort srcPort = (ushort)((IPEndPoint)udp.LocalEndPoint!).Port;
 
         // Register with ICMP listener BEFORE sending.
@@ -82,8 +90,14 @@ internal sealed class UdpPinger : IPinger
 
         PingStatus status = reply.Value.IcmpType switch
         {
+            // ICMPv4: 11=Time Exceeded, 3=Destination Unreachable
             11 => PingStatus.TtlExpired,
-            3 when reply.Value.IcmpCode == 3 => PingStatus.Success,   // Port Unreachable = reached destination
+            3 when reply.Value.IcmpCode == 3 && target.AddressFamily == AddressFamily.InterNetwork
+                => PingStatus.Success,   // ICMPv4 Port Unreachable = reached destination
+            3 when target.AddressFamily == AddressFamily.InterNetworkV6
+                => PingStatus.TtlExpired,  // ICMPv6 Time Exceeded
+            1 when target.AddressFamily == AddressFamily.InterNetworkV6
+                => PingStatus.Success,     // ICMPv6 Port Unreachable (code 4) = reached destination
             3 => PingStatus.DestinationUnreachable,
             _ => PingStatus.Error,
         };

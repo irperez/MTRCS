@@ -33,7 +33,8 @@ internal sealed class MtrCommand
         double graphCyan,
         double graphYellow,
         double graphRed,
-        bool includeFirstPing = false)
+        bool includeFirstPing = false,
+        bool preferIPv6 = false)
     {
         internal string  Host            { get; } = host;
         internal int     MaxHops         { get; } = maxHops;
@@ -64,6 +65,12 @@ internal sealed class MtrCommand
         /// Corresponds to the <c>--no-warmup</c> CLI flag.
         /// </summary>
         internal bool    IncludeFirstPing { get; } = includeFirstPing;
+
+        /// <summary>
+        /// When <see langword="true"/>, IPv6 is preferred when resolving hostnames.
+        /// Corresponds to the <c>-6</c> / <c>--ipv6</c> CLI flag.
+        /// </summary>
+        internal bool    PreferIPv6       { get; } = preferIPv6;
 
         /// <summary>Builds the <see cref="RttThresholds"/> from CLI settings.</summary>
         internal RttThresholds BuildThresholds() => new()
@@ -144,7 +151,8 @@ internal sealed class MtrCommand
                 settings.ShowAsn,
                 mode,
                 settings.Port,
-                warmupPing: !settings.IncludeFirstPing).ConfigureAwait(false);
+                warmupPing: !settings.IncludeFirstPing,
+                preferIPv6: settings.PreferIPv6).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -162,8 +170,8 @@ internal sealed class MtrCommand
 
         using IDisposable? factoryDisposable = options.Mode switch
         {
-            ProbeMode.Tcp => new TcpPingerFactory(options.Port),
-            ProbeMode.Udp => new UdpPingerFactory(options.Port),
+            ProbeMode.Tcp => new TcpPingerFactory(options.Port, options.Target.AddressFamily),
+            ProbeMode.Udp => new UdpPingerFactory(options.Port, options.Target.AddressFamily),
             _ => null,
         };
         IPingerFactory pingerFactory = options.Mode switch

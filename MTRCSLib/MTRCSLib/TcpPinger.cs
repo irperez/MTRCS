@@ -10,17 +10,18 @@ namespace MTRCSLib;
 /// with the requested TTL.  Intermediate routers respond with ICMP Time
 /// Exceeded; the destination may respond with SYN-ACK (or RST).
 ///
-/// Uses a raw ICMP socket via <see cref="RawIcmpListener"/> to receive
+/// Uses a raw ICMP socket via <see cref="IRawIcmpListener"/> to receive
 /// TTL-expired messages (which do not arrive on the TCP socket itself),
 /// and a non-blocking TCP connect to detect a live destination.
+/// Supports both IPv4 and IPv6 targets.
 /// </summary>
 internal sealed class TcpPinger : IPinger
 {
-    private readonly RawIcmpListener _listener;
+    private readonly IRawIcmpListener _listener;
     private readonly int _destPort;
     private bool _disposed;
 
-    public TcpPinger(RawIcmpListener listener, int destPort = 80)
+    public TcpPinger(IRawIcmpListener listener, int destPort = 80)
     {
         ArgumentNullException.ThrowIfNull(listener);
         _listener = listener;
@@ -40,13 +41,21 @@ internal sealed class TcpPinger : IPinger
         ArgumentNullException.ThrowIfNull(target);
 
         // Allocate a local ephemeral port; bind so we know the port before connecting.
-        using Socket tcp = new(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
-        tcp.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.IpTimeToLive, ttl);
+        using Socket tcp = new(target.AddressFamily, SocketType.Stream, ProtocolType.Tcp);
+
+        if (target.AddressFamily == AddressFamily.InterNetworkV6)
+            tcp.SetSocketOption(SocketOptionLevel.IPv6, SocketOptionName.HopLimit, ttl);
+        else
+            tcp.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.IpTimeToLive, ttl);
+
         tcp.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
         tcp.Blocking = false;
 
         // Bind to :0 to get an OS-assigned ephemeral port.
-        tcp.Bind(new IPEndPoint(IPAddress.Any, 0));
+        IPEndPoint localEp = target.AddressFamily == AddressFamily.InterNetworkV6
+            ? new IPEndPoint(IPAddress.IPv6Any, 0)
+            : new IPEndPoint(IPAddress.Any, 0);
+        tcp.Bind(localEp);
         ushort srcPort = (ushort)((IPEndPoint)tcp.LocalEndPoint!).Port;
 
         // Register with the ICMP listener BEFORE sending so we don't miss a fast reply.

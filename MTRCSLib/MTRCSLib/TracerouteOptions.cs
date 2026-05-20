@@ -1,4 +1,4 @@
-using System.Net;
+﻿using System.Net;
 
 namespace MTRCSLib;
 
@@ -7,7 +7,7 @@ namespace MTRCSLib;
 /// </summary>
 public readonly struct TracerouteOptions
 {
-    /// <summary>MTR default — maximum number of hops before giving up.</summary>
+    /// <summary>MTR default â€” maximum number of hops before giving up.</summary>
     public const int DefaultMaxHops = 30;
 
     /// <summary>Default probe interval in milliseconds (1 second, matching MTR).</summary>
@@ -16,7 +16,7 @@ public readonly struct TracerouteOptions
     /// <summary>Default per-probe timeout in milliseconds.</summary>
     public const int DefaultTimeoutMs = 800;
 
-    /// <summary>Default ICMP payload data size in bytes (matching MTR default of 28 bytes total → 20 bytes data after 8-byte header).</summary>
+    /// <summary>Default ICMP payload data size in bytes (matching MTR default of 28 bytes total â†’ 20 bytes data after 8-byte header).</summary>
     public const int DefaultPayloadBytes = 28;
 
     /// <summary>Resolved target IPv4 address.</summary>
@@ -25,7 +25,7 @@ public readonly struct TracerouteOptions
     /// <summary>Original hostname/address string supplied by the caller.</summary>
     public string Host { get; }
 
-    /// <summary>Maximum number of TTL hops to probe (1–<see cref="DefaultMaxHops"/>).</summary>
+    /// <summary>Maximum number of TTL hops to probe (1â€“<see cref="DefaultMaxHops"/>).</summary>
     public int MaxHops { get; }
 
     /// <summary>Milliseconds between probe cycles.</summary>
@@ -99,8 +99,8 @@ public readonly struct TracerouteOptions
         ArgumentNullException.ThrowIfNull(target);
         ArgumentNullException.ThrowIfNull(host);
 
-        if (!NetworkUtils.IsIPv4(target))
-            throw new ArgumentException("Only IPv4 targets are supported.", nameof(target));
+        if (!NetworkUtils.IsIPv4(target) && !NetworkUtils.IsIPv6(target))
+            throw new ArgumentException("Target must be an IPv4 or IPv6 address.", nameof(target));
         if (maxHops is < 1 or > 255)
             throw new ArgumentOutOfRangeException(nameof(maxHops), "Must be between 1 and 255.");
         if (intervalMs < 1)
@@ -124,9 +124,10 @@ public readonly struct TracerouteOptions
     }
 
     /// <summary>
-    /// Resolves <paramref name="host"/> via DNS (first IPv4 result) and returns a configured
-    /// <see cref="TracerouteOptions"/>. Throws <see cref="InvalidOperationException"/> if no
-    /// IPv4 address is found for the host.
+    /// Resolves <paramref name="host"/> via DNS and returns a configured <see cref="TracerouteOptions"/>.
+    /// When <paramref name="preferIPv6"/> is <see langword="true"/> an IPv6 address is preferred;
+    /// otherwise IPv4 is preferred with IPv6 as fallback when no IPv4 result is found.
+    /// Throws <see cref="InvalidOperationException"/> if no address is found.
     /// </summary>
     public static async ValueTask<TracerouteOptions> ResolveAsync(
         string host,
@@ -138,6 +139,7 @@ public readonly struct TracerouteOptions
         ProbeMode mode = ProbeMode.Icmp,
         int port = 0,
         bool warmupPing = true,
+        bool preferIPv6 = false,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(host);
@@ -145,16 +147,48 @@ public readonly struct TracerouteOptions
         // Try parse first to avoid a DNS round-trip for literal IPs.
         if (IPAddress.TryParse(host, out IPAddress? parsed))
         {
-            if (!NetworkUtils.IsIPv4(parsed))
-                throw new ArgumentException("Only IPv4 targets are supported.", nameof(host));
+            if (!NetworkUtils.IsIPv4(parsed) && !NetworkUtils.IsIPv6(parsed))
+                throw new ArgumentException("Host must be a valid IPv4 or IPv6 address.", nameof(host));
             return Create(parsed, host, maxHops, intervalMs, timeoutMs, payloadBytes, enableAsn, mode, port, warmupPing);
         }
 
-        IPAddress[] addresses = await Dns.GetHostAddressesAsync(host, System.Net.Sockets.AddressFamily.InterNetwork, cancellationToken).ConfigureAwait(false);
+        IPAddress[] all = await TryResolveAsync(host, System.Net.Sockets.AddressFamily.Unspecified, cancellationToken).ConfigureAwait(false);
 
-        if (addresses.Length == 0)
-            throw new InvalidOperationException($"No IPv4 address found for host '{host}'.");
+        if (all.Length == 0)
+            throw new InvalidOperationException($"No IPv4 or IPv6 address found for host '{host}'.");
 
-        return Create(addresses[0], host, maxHops, intervalMs, timeoutMs, payloadBytes, enableAsn, mode, port, warmupPing);
+        var preferredFamily = preferIPv6
+            ? System.Net.Sockets.AddressFamily.InterNetworkV6
+            : System.Net.Sockets.AddressFamily.InterNetwork;
+
+        IPAddress? preferred = Array.Find(all, a => a.AddressFamily == preferredFamily) ?? all[0];
+
+        return Create(preferred, host, maxHops, intervalMs, timeoutMs, payloadBytes, enableAsn, mode, port, warmupPing);
+    }
+
+    /// <summary>
+    /// Calls <see cref="Dns.GetHostAddressesAsync"/> and returns an empty array instead of
+    /// throwing when no records of the requested type exist.
+    /// On Windows the DNS stack throws <see cref="System.Net.Sockets.SocketException"/> with
+    /// <see cref="System.Net.Sockets.SocketError.NoData"/> or
+    /// <see cref="System.Net.Sockets.SocketError.HostNotFound"/> rather than returning an empty
+    /// result â€” this wrapper normalises that platform behaviour so the fallback logic runs.
+    /// </summary>
+    private static async ValueTask<IPAddress[]> TryResolveAsync(
+        string host,
+        System.Net.Sockets.AddressFamily family,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await Dns.GetHostAddressesAsync(host, family, cancellationToken).ConfigureAwait(false);
+        }
+        catch (System.Net.Sockets.SocketException ex)
+            when (ex.SocketErrorCode is System.Net.Sockets.SocketError.NoData
+                                     or System.Net.Sockets.SocketError.HostNotFound
+                                     or System.Net.Sockets.SocketError.TryAgain)
+        {
+            return [];
+        }
     }
 }

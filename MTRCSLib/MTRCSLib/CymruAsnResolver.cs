@@ -5,30 +5,36 @@ using MTRCSLib.Abstractions;
 namespace MTRCSLib;
 
 /// <summary>
-/// Resolves ASN information using Team Cymru's DNS TXT service at <c>origin.asn.cymru.com</c>.
+/// Resolves ASN information using Team Cymru's DNS TXT service.
 ///
-/// Query format: reverse the IPv4 octets and append <c>.origin.asn.cymru.com</c>.
+/// IPv4: reverse the octets and append <c>.origin.asn.cymru.com</c>.
 /// Example: 8.8.8.8 → <c>8.8.8.8.origin.asn.cymru.com</c> TXT
 /// Response: <c>"15169 | 8.8.8.0/24 | US | arin | 1992-12-01"</c>
+///
+/// IPv6: reverse all 32 nibbles of the full address and append <c>.origin6.asn.cymru.com</c>.
+/// Example: 2001:4860:4860::8888 → <c>8.8.8.8.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.6.8.4.0.6.8.4.1.0.0.2.origin6.asn.cymru.com</c>
+/// Response: <c>"15169 | 2001:4860::/32 | US | arin | 2005-03-14"</c>
 ///
 /// The ASN name is then resolved via <c>{asn}.asn.cymru.com</c> TXT.
 /// Response: <c>"15169 | US | arin | 1992-12-01 | GOOGLE, US"</c>
 /// </summary>
 public sealed class CymruAsnResolver : IAsnResolver
 {
-    private const string OriginSuffix = ".origin.asn.cymru.com";
-    private const string AsnSuffix    = ".asn.cymru.com";
+    private const string OriginSuffix   = ".origin.asn.cymru.com";
+    private const string Origin6Suffix  = ".origin6.asn.cymru.com";
+    private const string AsnSuffix      = ".asn.cymru.com";
 
     /// <inheritdoc/>
     public async ValueTask<AsnInfo?> ResolveAsync(IPAddress address, CancellationToken cancellationToken = default)
     {
-        if (!NetworkUtils.IsIPv4(address))
+        bool isV6 = NetworkUtils.IsIPv6(address);
+        if (!NetworkUtils.IsIPv4(address) && !isV6)
             return null;
 
         try
         {
-            string reversed = ReverseIp(address);
-            string originHost = reversed + OriginSuffix;
+            string reversed = isV6 ? ReverseIpv6(address) : ReverseIp(address);
+            string originHost = reversed + (isV6 ? Origin6Suffix : OriginSuffix);
 
             string? originTxt = await QueryFirstTxtAsync(originHost, cancellationToken).ConfigureAwait(false);
             if (originTxt is null)
@@ -86,6 +92,31 @@ public sealed class CymruAsnResolver : IAsnResolver
         address.TryWriteBytes(bytes, out _);
         return $"{bytes[3]}.{bytes[2]}.{bytes[1]}.{bytes[0]}";
     }
+
+    /// <summary>
+    /// Reverses all 32 nibbles of an IPv6 address for Team Cymru origin6 lookups.
+    /// e.g. 2001:4860:4860::8888 → "8.8.8.8.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.6.8.4.0.6.8.4.1.0.0.2"
+    /// </summary>
+    private static string ReverseIpv6(IPAddress address)
+    {
+        Span<byte> bytes = stackalloc byte[16];
+        address.TryWriteBytes(bytes, out _);
+
+        // Each byte produces two nibbles; we need all 32 nibbles in reverse order.
+        Span<char> chars = stackalloc char[32 + 31]; // 32 nibbles + 31 dots
+        int pos = 0;
+        for (int i = 15; i >= 0; i--)
+        {
+            if (pos > 0) chars[pos++] = '.';
+            chars[pos++] = ToHexChar(bytes[i] & 0x0F);
+            chars[pos++] = '.';
+            chars[pos++] = ToHexChar((bytes[i] >> 4) & 0x0F);
+        }
+        return new string(chars[..pos]);
+    }
+
+    private static char ToHexChar(int nibble) =>
+        nibble < 10 ? (char)('0' + nibble) : (char)('a' + nibble - 10);
 
     /// <summary>
     /// Resolves TXT records for <paramref name="host"/> and returns the first record's value,
