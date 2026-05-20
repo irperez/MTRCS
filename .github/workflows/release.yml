@@ -210,65 +210,144 @@ jobs:
 
       - name: Generate release notes
         id: notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          cat << 'EOF' > release-notes.md
-          ## 📦 MTRCS ${{ steps.version.outputs.tag }}
+          TAG="${{ steps.version.outputs.tag }}"
+          REPO="${{ github.repository }}"
 
-          Cross-platform MTR rewrite in C# — because your network deserves modern tooling.
+          # ── Find the previous release tag ─────────────────────────────────────
+          git fetch --tags --quiet
+          PREV_TAG=$(git tag --sort=-version:refname | grep -v "^${TAG}$" | head -1)
+          if [ -n "$PREV_TAG" ]; then
+            RANGE="${PREV_TAG}..HEAD"
+            RANGE_DISPLAY="since ${PREV_TAG}"
+          else
+            RANGE="HEAD"
+            RANGE_DISPLAY="(initial release)"
+          fi
 
-          ### 🚀 Quick Install
+          # ── Collect commits (no merges) ────────────────────────────────────────
+          # Format: 40-char SHA followed by a space then the subject line.
+          # Using fixed-width SHA avoids any delimiter collision with commit text.
+          mapfile -t COMMIT_LINES < <(git log "$RANGE" --pretty=format:"%H %s" --no-merges 2>/dev/null || true)
 
-          Download the binary for your platform below and make it executable:
+          # ── Build categorised commit list & summary counters ───────────────────
+          FEAT_COUNT=0; FIX_COUNT=0; OTHER_COUNT=0
+          COMMITS_MD=""
+          ISSUE_NUMS=""
+          for LINE in "${COMMIT_LINES[@]}"; do
+            SHA="${LINE:0:40}"
+            MSG="${LINE:41}"
+            SHORT="${SHA:0:7}"
+            LINK="https://github.com/${REPO}/commit/${SHA}"
+            COMMITS_MD="${COMMITS_MD}- ${MSG} [\`${SHORT}\`](${LINK})\n"
+            case "$MSG" in
+              feat*|add*|new*)  FEAT_COUNT=$((FEAT_COUNT+1)) ;;
+              fix*|bug*|patch*) FIX_COUNT=$((FIX_COUNT+1)) ;;
+              *)                OTHER_COUNT=$((OTHER_COUNT+1)) ;;
+            esac
+            # collect issue references — require # to follow whitespace or line-start
+            # to avoid matching URL anchors (e.g. github.com/page#section)
+            REFS=$(echo "$MSG" | grep -oE '(^| )#[0-9]+' | grep -oE '[0-9]+' || true)
+            for N in $REFS; do ISSUE_NUMS="${ISSUE_NUMS} ${N}"; done
+          done
 
-          ```bash
-          # Linux / macOS
-          chmod +x mtrcs
-          sudo mv mtrcs /usr/local/bin/
-          mtrcs --version
+          TOTAL=${#COMMIT_LINES[@]}
 
-          # Windows — run from any PowerShell or cmd prompt
-          .\mtrcs.exe --version
-          ```
+          # ── Build human-readable summary paragraph ─────────────────────────────
+          if [ "$TOTAL" -eq 0 ]; then
+            SUMMARY="No code changes in this release."
+          else
+            PARTS=""
+            [ "$FEAT_COUNT"  -gt 0 ] && PARTS="${PARTS}, ${FEAT_COUNT} new feature$([ $FEAT_COUNT  -gt 1 ] && echo s)"
+            [ "$FIX_COUNT"   -gt 0 ] && PARTS="${PARTS}, ${FIX_COUNT} bug fix$([ $FIX_COUNT   -gt 1 ] && echo es)"
+            [ "$OTHER_COUNT" -gt 0 ] && PARTS="${PARTS}, ${OTHER_COUNT} other improvement$([ $OTHER_COUNT -gt 1 ] && echo s)"
+            PARTS="${PARTS#, }"  # strip leading ", "
+            SUMMARY="This release contains **${TOTAL} commit$([ $TOTAL -gt 1 ] && echo s)** ${RANGE_DISPLAY}"
+            [ -n "$PARTS" ] && SUMMARY="${SUMMARY} — including ${PARTS}."  || SUMMARY="${SUMMARY}."
+          fi
 
-          ### 📋 Platform Downloads
+          # ── Fetch referenced issues from GitHub API ────────────────────────────
+          ISSUES_MD=""
+          for NUM in $(echo "$ISSUE_NUMS" | tr ' ' '\n' | sort -un | grep -E '^[0-9]+$'); do
+            ROW=$(gh api "repos/${REPO}/issues/${NUM}" \
+              --jq '"| [#\(.number) — \(.title)](https://github.com/'${REPO}'/issues/\(.number)) | \(.state) |"' \
+              2>/dev/null || true)
+            [ -n "$ROW" ] && ISSUES_MD="${ISSUES_MD}${ROW}\n"
+          done
 
-          | Platform | File | Notes |
-          |----------|------|-------|
-          | Windows x64 | `mtrcs-${{ steps.version.outputs.tag }}-win-x64.zip` | Native AOT |
-          | macOS Apple Silicon | `mtrcs-${{ steps.version.outputs.tag }}-osx-arm64.tar.gz` | Native AOT |
-          | Linux x64 | `mtrcs-${{ steps.version.outputs.tag }}-linux-x64.tar.gz` | Native AOT |
-          | Linux ARM64 | `mtrcs-${{ steps.version.outputs.tag }}-linux-arm64.tar.gz` | Native AOT |
-          | Raspberry Pi (ARMv7) | `mtrcs-${{ steps.version.outputs.tag }}-linux-arm.tar.gz` | Self-contained |
-
-          ### 🔐 Verify Your Download (SHA-256)
-
-          A `checksums.sha256.txt` file is attached to this release. Verify the integrity of your download:
-
-          ```bash
-          # Linux / macOS — download checksums.sha256.txt and your artifact into the
-          # same directory, then verify the specific file you downloaded:
-          grep "mtrcs-${{ steps.version.outputs.tag }}-linux-x64.tar.gz" checksums.sha256.txt | sha256sum --check
-
-          # Windows (PowerShell)
-          $expected = (Select-String "win-x64" checksums.sha256.txt).Line.Split(' ')[0]
-          $actual   = (Get-FileHash mtrcs-${{ steps.version.outputs.tag }}-win-x64.zip -Algorithm SHA256).Hash.ToLower()
-          if ($actual -eq $expected) { "✅ Checksum OK" } else { "❌ Checksum MISMATCH" }
-          ```
-
-          ### ⚙️ Requirements
-
-          - **Linux**: No runtime needed (self-contained binary)
-          - **macOS**: No runtime needed — may require `xattr -d com.apple.quarantine ./mtrcs` on first run
-          - **Windows**: May require running as Administrator for raw ICMP sockets
-          - **Raspberry Pi**: May need `sudo` for ICMP probes
-
-          ### 📝 Changelog
-
-          See [CHANGELOG](https://github.com/irperez/MTRCS/blob/main/CHANGELOG.md) for full details.
-
-          ---
-          > Built from commit `${{ github.sha }}` · Build #${{ github.run_number }}
-          EOF
+          # ── Write final release-notes.md ───────────────────────────────────────
+          {
+            echo "## 📦 MTRCS ${TAG}"
+            echo ""
+            echo "$SUMMARY"
+            echo ""
+            echo "### 🚀 Quick Install"
+            echo ""
+            echo "Download the binary for your platform below and make it executable:"
+            echo ""
+            echo '```bash'
+            echo '# Linux / macOS'
+            echo 'chmod +x mtrcs'
+            echo 'sudo mv mtrcs /usr/local/bin/'
+            echo 'mtrcs --version'
+            echo ''
+            echo '# Windows — run from any PowerShell or cmd prompt'
+            echo '.\mtrcs.exe --version'
+            echo '```'
+            echo ""
+            echo "### 📋 Platform Downloads"
+            echo ""
+            echo "| Platform | File | Notes |"
+            echo "|----------|------|-------|"
+            echo "| Windows x64 | \`mtrcs-${TAG}-win-x64.zip\` | Native AOT |"
+            echo "| macOS Apple Silicon | \`mtrcs-${TAG}-osx-arm64.tar.gz\` | Native AOT |"
+            echo "| Linux x64 | \`mtrcs-${TAG}-linux-x64.tar.gz\` | Native AOT |"
+            echo "| Linux ARM64 | \`mtrcs-${TAG}-linux-arm64.tar.gz\` | Native AOT |"
+            echo "| Raspberry Pi (ARMv7) | \`mtrcs-${TAG}-linux-arm.tar.gz\` | Self-contained |"
+            echo ""
+            echo "### 🔐 Verify Your Download (SHA-256)"
+            echo ""
+            echo "A \`checksums.sha256.txt\` file is attached to this release. Verify the integrity of your download:"
+            echo ""
+            echo '```bash'
+            echo "# Linux / macOS — download checksums.sha256.txt and your artifact into the"
+            echo "# same directory, then verify the specific file you downloaded:"
+            echo "grep \"mtrcs-${TAG}-linux-x64.tar.gz\" checksums.sha256.txt | sha256sum --check"
+            echo ""
+            echo "# Windows (PowerShell)"
+            echo "\$expected = (Select-String \"win-x64\" checksums.sha256.txt).Line.Split(' ')[0]"
+            echo "\$actual   = (Get-FileHash mtrcs-${TAG}-win-x64.zip -Algorithm SHA256).Hash.ToLower()"
+            echo 'if ($actual -eq $expected) { "✅ Checksum OK" } else { "❌ Checksum MISMATCH" }'
+            echo '```'
+            echo ""
+            echo "### ⚙️ Requirements"
+            echo ""
+            echo "- **Linux**: No runtime needed (self-contained binary)"
+            echo "- **macOS**: No runtime needed — may require \`xattr -d com.apple.quarantine ./mtrcs\` on first run"
+            echo "- **Windows**: May require running as Administrator for raw ICMP sockets"
+            echo "- **Raspberry Pi**: May need \`sudo\` for ICMP probes"
+            echo ""
+            echo "### 📝 Commits ${RANGE_DISPLAY}"
+            echo ""
+            if [ -n "$COMMITS_MD" ]; then
+              printf '%b' "$COMMITS_MD"
+            else
+              echo "*(No commits found in this range)*"
+            fi
+            echo ""
+            if [ -n "$ISSUES_MD" ]; then
+              echo "### 🔗 Related Issues"
+              echo ""
+              echo "| Issue | Status |"
+              echo "|-------|--------|"
+              printf '%b' "$ISSUES_MD"
+              echo ""
+            fi
+            echo "---"
+            echo "> Built from commit \`${{ github.sha }}\` · Build #${{ github.run_number }}"
+          } > release-notes.md
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
