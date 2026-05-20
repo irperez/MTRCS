@@ -53,7 +53,7 @@ internal sealed class MtrRenderer
             : $"{options.Host} ({targetIp})";
 
         _titleBytes  = EncodeTitleLine(titleHost);
-        _headerBytes = EncodeHeaderLine(options.EnableAsn);
+        _headerBytes = EncodeHeaderLine(options.EnableAsn, options.ShowPercentiles);
     }
 
     /// <summary>
@@ -127,6 +127,15 @@ internal sealed class MtrRenderer
         WriteRttColumn(w, hasRtt ? h.StdDev                                      : double.NaN, numBuf);
         w.Write(ColSep);
         WriteRttColumn(w, !double.IsNaN(h.Jitter) ? h.Jitter : double.NaN, numBuf);
+
+        // ── P95 / P99 percentile columns (opt-in) ─────────────────────────────
+        if (_options.ShowPercentiles)
+        {
+            w.Write(ColSep);
+            WriteRttColumn(w, hasRtt ? h.P95 : double.NaN, numBuf);
+            w.Write(ColSep);
+            WriteRttColumn(w, hasRtt ? h.P99 : double.NaN, numBuf);
+        }
 
         // ── ASN column ────────────────────────────────────────────────────────
         if (_options.EnableAsn)
@@ -302,7 +311,7 @@ internal sealed class MtrRenderer
         return w.ToArray();
     }
 
-    private static byte[] EncodeHeaderLine(bool showAsn)
+    private static byte[] EncodeHeaderLine(bool showAsn, bool showPercentiles = false)
     {
         using var w = new AnsiWriter(256);
         w.Bold();
@@ -323,6 +332,13 @@ internal sealed class MtrRenderer
         w.WriteFixed("StDev".AsSpan(),  W_Rtt,   rightAlign: true);
         w.Write(ColSep);
         w.WriteFixed("Jitter".AsSpan(), W_Rtt,   rightAlign: true);
+        if (showPercentiles)
+        {
+            w.Write(ColSep);
+            w.WriteFixed("P95".AsSpan(), W_Rtt, rightAlign: true);
+            w.Write(ColSep);
+            w.WriteFixed("P99".AsSpan(), W_Rtt, rightAlign: true);
+        }
         w.Write(ColSep);
         w.WriteFixed("Graph".AsSpan(),  W_Spark);
         if (showAsn)

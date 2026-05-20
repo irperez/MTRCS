@@ -19,13 +19,15 @@ internal sealed class TcpPinger : IPinger
 {
     private readonly IRawIcmpListener _listener;
     private readonly int _destPort;
+    private readonly int _dscpValue;
     private bool _disposed;
 
-    public TcpPinger(IRawIcmpListener listener, int destPort = 80)
+    public TcpPinger(IRawIcmpListener listener, int destPort = 80, int dscpValue = 0)
     {
         ArgumentNullException.ThrowIfNull(listener);
         _listener = listener;
         _destPort = destPort;
+        _dscpValue = dscpValue;
     }
 
     /// <inheritdoc/>
@@ -47,6 +49,16 @@ internal sealed class TcpPinger : IPinger
             tcp.SetSocketOption(SocketOptionLevel.IPv6, SocketOptionName.HopLimit, ttl);
         else
             tcp.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.IpTimeToLive, ttl);
+
+        // DSCP is encoded in the upper 6 bits of the Traffic Class / TOS byte (value << 2).
+        if (_dscpValue > 0)
+        {
+            int tos = _dscpValue << 2;
+            if (target.AddressFamily == AddressFamily.InterNetworkV6)
+                tcp.SetSocketOption(SocketOptionLevel.IPv6, SocketOptionName.TypeOfService, tos);
+            else
+                tcp.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.TypeOfService, tos);
+        }
 
         tcp.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
         tcp.Blocking = false;

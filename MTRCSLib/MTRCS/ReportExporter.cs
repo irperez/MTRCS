@@ -48,9 +48,13 @@ internal sealed class ReportExporter(TracerouteOptions options)
         sb.AppendLine($"Generated: {DateTimeOffset.UtcNow:u}");
         sb.AppendLine();
 
-        string header = options.EnableAsn
-            ? $"{"HOST",-40}  {"Loss%",7}  {"Snt",5}  {"Last",7}  {"Avg",7}  {"Best",7}  {"Wrst",7}  {"StDev",7}  {"Jitter",7}  {"ASN",-22}"
-            : $"{"HOST",-40}  {"Loss%",7}  {"Snt",5}  {"Last",7}  {"Avg",7}  {"Best",7}  {"Wrst",7}  {"StDev",7}  {"Jitter",7}";
+        string header = (options.EnableAsn, options.ShowPercentiles) switch
+        {
+            (true,  true)  => $"{"HOST",-40}  {"Loss%",7}  {"Snt",5}  {"Last",7}  {"Avg",7}  {"Best",7}  {"Wrst",7}  {"StDev",7}  {"Jitter",7}  {"P95",7}  {"P99",7}  {"ASN",-22}",
+            (true,  false) => $"{"HOST",-40}  {"Loss%",7}  {"Snt",5}  {"Last",7}  {"Avg",7}  {"Best",7}  {"Wrst",7}  {"StDev",7}  {"Jitter",7}  {"ASN",-22}",
+            (false, true)  => $"{"HOST",-40}  {"Loss%",7}  {"Snt",5}  {"Last",7}  {"Avg",7}  {"Best",7}  {"Wrst",7}  {"StDev",7}  {"Jitter",7}  {"P95",7}  {"P99",7}",
+            _              => $"{"HOST",-40}  {"Loss%",7}  {"Snt",5}  {"Last",7}  {"Avg",7}  {"Best",7}  {"Wrst",7}  {"StDev",7}  {"Jitter",7}",
+        };
         sb.AppendLine(header);
         sb.AppendLine(new string('-', header.Length));
 
@@ -69,15 +73,20 @@ internal sealed class ReportExporter(TracerouteOptions options)
             string wrst   = hasRtt && h.Worst > double.MinValue ? h.Worst.ToString("F1") : "???";
             string stdev  = hasRtt ? h.StdDev.ToString("F1")  : "???";
             string jitter = !double.IsNaN(h.Jitter) ? h.Jitter.ToString("F1") : "???";
+            string p95    = hasRtt && !double.IsNaN(h.P95) ? h.P95.ToString("F1") : "???";
+            string p99    = hasRtt && !double.IsNaN(h.P99) ? h.P99.ToString("F1") : "???";
+
+            string rowBase = $"{host,-40}  {loss,7}  {snt,5}  {last,7}  {avg,7}  {best,7}  {wrst,7}  {stdev,7}  {jitter,7}";
+            string rowPercentiles = options.ShowPercentiles ? $"  {p95,7}  {p99,7}" : "";
 
             if (options.EnableAsn)
             {
                 string asn = !h.AsnResolved ? "..." : h.Asn?.ToString() ?? "???";
-                sb.AppendLine($"{host,-40}  {loss,7}  {snt,5}  {last,7}  {avg,7}  {best,7}  {wrst,7}  {stdev,7}  {jitter,7}  {asn,-22}");
+                sb.AppendLine($"{rowBase}{rowPercentiles}  {asn,-22}");
             }
             else
             {
-                sb.AppendLine($"{host,-40}  {loss,7}  {snt,5}  {last,7}  {avg,7}  {best,7}  {wrst,7}  {stdev,7}  {jitter,7}");
+                sb.AppendLine($"{rowBase}{rowPercentiles}");
             }
         }
 
@@ -88,9 +97,13 @@ internal sealed class ReportExporter(TracerouteOptions options)
     {
         var sb = new StringBuilder();
 
-        string header = options.EnableAsn
-            ? "Hop,Host,IP,Loss%,Snt,Last,Avg,Best,Wrst,StDev,Jitter,ASN,ASNDesc"
-            : "Hop,Host,IP,Loss%,Snt,Last,Avg,Best,Wrst,StDev,Jitter";
+        string header = (options.EnableAsn, options.ShowPercentiles) switch
+        {
+            (true,  true)  => "Hop,Host,IP,Loss%,Snt,Last,Avg,Best,Wrst,StDev,Jitter,P95,P99,ASN,ASNDesc",
+            (true,  false) => "Hop,Host,IP,Loss%,Snt,Last,Avg,Best,Wrst,StDev,Jitter,ASN,ASNDesc",
+            (false, true)  => "Hop,Host,IP,Loss%,Snt,Last,Avg,Best,Wrst,StDev,Jitter,P95,P99",
+            _              => "Hop,Host,IP,Loss%,Snt,Last,Avg,Best,Wrst,StDev,Jitter",
+        };
         sb.AppendLine(header);
 
         for (int i = 0; i < hops.Length; i++)
@@ -107,16 +120,21 @@ internal sealed class ReportExporter(TracerouteOptions options)
             string wrst  = hasRtt && h.Worst > double.MinValue ? h.Worst.ToString("F1")  : "";
             string stdev = hasRtt ? h.StdDev.ToString("F1")   : "";
             string jitter = !double.IsNaN(h.Jitter) ? h.Jitter.ToString("F1") : "";
+            string p95 = hasRtt && !double.IsNaN(h.P95) ? h.P95.ToString("F1") : "";
+            string p99 = hasRtt && !double.IsNaN(h.P99) ? h.P99.ToString("F1") : "";
+
+            string rowBase = $"{i + 1},{CsvEscape(host)},{CsvEscape(ip)},{loss},{h.Sent},{last},{avg},{best},{wrst},{stdev},{jitter}";
+            string rowPercentiles = options.ShowPercentiles ? $",{p95},{p99}" : "";
 
             if (options.EnableAsn)
             {
                 string asnNum  = h.Asn?.Asn ?? "";
                 string asnDesc = h.Asn?.Description ?? "";
-                sb.AppendLine($"{i + 1},{CsvEscape(host)},{CsvEscape(ip)},{loss},{h.Sent},{last},{avg},{best},{wrst},{stdev},{jitter},{CsvEscape(asnNum)},{CsvEscape(asnDesc)}");
+                sb.AppendLine($"{rowBase}{rowPercentiles},{CsvEscape(asnNum)},{CsvEscape(asnDesc)}");
             }
             else
             {
-                sb.AppendLine($"{i + 1},{CsvEscape(host)},{CsvEscape(ip)},{loss},{h.Sent},{last},{avg},{best},{wrst},{stdev},{jitter}");
+                sb.AppendLine($"{rowBase}{rowPercentiles}");
             }
         }
 
@@ -145,6 +163,9 @@ internal sealed class ReportExporter(TracerouteOptions options)
                 Wrst   = hasRtt && h.Worst > double.MinValue ? Math.Round(h.Worst, 1)  : null,
                 StDev  = hasRtt ? Math.Round(h.StdDev, 1)  : null,
                 Jitter = !double.IsNaN(h.Jitter) ? Math.Round(h.Jitter, 1) : null,
+                // P95/P99 are null when --percentiles is not enabled; WhenWritingNull omits them.
+                P95    = options.ShowPercentiles && hasRtt && !double.IsNaN(h.P95) ? Math.Round(h.P95, 1) : null,
+                P99    = options.ShowPercentiles && hasRtt && !double.IsNaN(h.P99) ? Math.Round(h.P99, 1) : null,
                 // Asn/AsnDesc are null when --asn is not enabled; WhenWritingNull omits them.
                 Asn     = options.EnableAsn ? h.Asn?.Asn         : null,
                 AsnDesc = options.EnableAsn ? h.Asn?.Description : null,

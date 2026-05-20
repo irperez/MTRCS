@@ -41,6 +41,17 @@ public readonly struct TracerouteOptions
     public bool EnableAsn { get; }
 
     /// <summary>
+    /// When <see langword="true"/>, P95 and P99 percentile columns are displayed in the live view and reports.
+    /// </summary>
+    public bool ShowPercentiles { get; }
+
+    /// <summary>
+    /// DSCP value (0–63) written into the IP header of every probe packet, or 0 for the OS default.
+    /// Allows IT pros to verify that QoS policies honour differentiated-services markings hop-by-hop.
+    /// </summary>
+    public int DscpValue { get; }
+
+    /// <summary>
     /// When <see langword="true"/> (the default), one silent warmup probe cycle is fired
     /// before statistics are recorded.  The first real-world ping is almost always inflated
     /// due to cold ARP/routing/socket caches; discarding it keeps charts and averages clean.
@@ -67,7 +78,9 @@ public readonly struct TracerouteOptions
         bool enableAsn,
         ProbeMode mode,
         int port,
-        bool warmupPing)
+        bool warmupPing,
+        bool showPercentiles,
+        int dscpValue)
     {
         Target = target;
         Host = host;
@@ -79,6 +92,8 @@ public readonly struct TracerouteOptions
         Mode = mode;
         Port = port;
         WarmupPing = warmupPing;
+        ShowPercentiles = showPercentiles;
+        DscpValue = dscpValue;
     }
 
     /// <summary>
@@ -94,7 +109,9 @@ public readonly struct TracerouteOptions
         bool enableAsn = false,
         ProbeMode mode = ProbeMode.Icmp,
         int port = 0,
-        bool warmupPing = true)
+        bool warmupPing = true,
+        bool showPercentiles = false,
+        int dscpValue = 0)
     {
         ArgumentNullException.ThrowIfNull(target);
         ArgumentNullException.ThrowIfNull(host);
@@ -111,6 +128,8 @@ public readonly struct TracerouteOptions
             throw new ArgumentOutOfRangeException(nameof(payloadBytes), "Must be non-negative.");
         if (port < 0 || port > 65535)
             throw new ArgumentOutOfRangeException(nameof(port), "Must be between 0 and 65535.");
+        if (dscpValue is < 0 or > 63)
+            throw new ArgumentOutOfRangeException(nameof(dscpValue), "DSCP value must be between 0 and 63.");
 
         // Resolve default port per mode when caller passes 0.
         int resolvedPort = port != 0 ? port : mode switch
@@ -120,7 +139,7 @@ public readonly struct TracerouteOptions
             _ => 0,
         };
 
-        return new TracerouteOptions(target, host, maxHops, intervalMs, timeoutMs, payloadBytes, enableAsn, mode, resolvedPort, warmupPing);
+        return new TracerouteOptions(target, host, maxHops, intervalMs, timeoutMs, payloadBytes, enableAsn, mode, resolvedPort, warmupPing, showPercentiles, dscpValue);
     }
 
     /// <summary>
@@ -140,6 +159,8 @@ public readonly struct TracerouteOptions
         int port = 0,
         bool warmupPing = true,
         bool preferIPv6 = false,
+        bool showPercentiles = false,
+        int dscpValue = 0,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(host);
@@ -149,7 +170,7 @@ public readonly struct TracerouteOptions
         {
             if (!NetworkUtils.IsIPv4(parsed) && !NetworkUtils.IsIPv6(parsed))
                 throw new ArgumentException("Host must be a valid IPv4 or IPv6 address.", nameof(host));
-            return Create(parsed, host, maxHops, intervalMs, timeoutMs, payloadBytes, enableAsn, mode, port, warmupPing);
+            return Create(parsed, host, maxHops, intervalMs, timeoutMs, payloadBytes, enableAsn, mode, port, warmupPing, showPercentiles, dscpValue);
         }
 
         IPAddress[] all = await TryResolveAsync(host, System.Net.Sockets.AddressFamily.Unspecified, cancellationToken).ConfigureAwait(false);
@@ -163,7 +184,7 @@ public readonly struct TracerouteOptions
 
         IPAddress? preferred = Array.Find(all, a => a.AddressFamily == preferredFamily) ?? all[0];
 
-        return Create(preferred, host, maxHops, intervalMs, timeoutMs, payloadBytes, enableAsn, mode, port, warmupPing);
+        return Create(preferred, host, maxHops, intervalMs, timeoutMs, payloadBytes, enableAsn, mode, port, warmupPing, showPercentiles, dscpValue);
     }
 
     /// <summary>

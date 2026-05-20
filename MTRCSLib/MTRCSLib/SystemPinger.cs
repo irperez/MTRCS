@@ -25,7 +25,13 @@ internal sealed class SystemPinger : IPinger
     /// sized for the largest payload this session will ever send.
     /// </summary>
     /// <param name="maxPayloadBytes">Maximum ICMP data payload bytes (not including the 8-byte header).</param>
-    public SystemPinger(int maxPayloadBytes = TracerouteOptions.DefaultPayloadBytes)
+    /// <param name="dscpValue">
+    /// DSCP value (0–63) to embed in probe packets.
+    /// Note: <see cref="System.Net.NetworkInformation.Ping"/> does not expose a TOS/DSCP setter;
+    /// this value is accepted for API consistency but is not applied in ICMP mode.
+    /// Use TCP (<c>--tcp</c>) or UDP (<c>--udp</c>) probe modes to enforce DSCP marking.
+    /// </param>
+    public SystemPinger(int maxPayloadBytes = TracerouteOptions.DefaultPayloadBytes, int dscpValue = 0)
     {
         if (maxPayloadBytes is < 0 or > MaxPayloadBytes)
             throw new ArgumentOutOfRangeException(nameof(maxPayloadBytes));

@@ -40,12 +40,20 @@ internal sealed class MtrAnsiRenderer
     private const string ColSep = "  ";
     private const int ColSepW = 2;
 
-    // Total width of the stats section (Loss%..Jitter+Sparkline), not including ASN.
+    // Base stats width (Loss%..Sparkline), not including ASN or percentile columns.
     // Loss%(7)+Sep(2)+Snt(5)+Sep(2)+Last(7)+Sep(2)+Avg(7)+Sep(2)+Best(7)+Sep(2)+Wrst(7)+Sep(2)+StDev(7)+Sep(2)+Jitter(7)+Sep(2)+Sparkline(8) = 76
-    private const int W_Stats = W_Loss + ColSepW + W_Snt + ColSepW
-                              + W_Rtt + ColSepW + W_Rtt + ColSepW
-                              + W_Rtt + ColSepW + W_Rtt + ColSepW
-                              + W_Rtt + ColSepW + W_Rtt + ColSepW + W_Spark;   // = 76
+    private const int W_StatsBase = W_Loss + ColSepW + W_Snt + ColSepW
+                                  + W_Rtt + ColSepW + W_Rtt + ColSepW
+                                  + W_Rtt + ColSepW + W_Rtt + ColSepW
+                                  + W_Rtt + ColSepW + W_Rtt + ColSepW + W_Spark;  // = 76
+
+    // P95/P99 add two RTT columns (each W_Rtt + ColSepW).
+    private const int W_PercentilesExtra = (W_Rtt + ColSepW) * 2;
+
+    private int TotalStatsWidth =>
+        W_StatsBase
+        + (_showPercentiles ? W_PercentilesExtra : 0)
+        + (_showAsn ? ColSepW + W_Asn : 0);
 
     // ── pre-encoded constant byte sequences ───────────────────────────────────
 
@@ -59,6 +67,7 @@ internal sealed class MtrAnsiRenderer
     private readonly byte[] _asnHeaderBytes;    // "ASN" bold
     private readonly byte[] _sparklineHeaderBytes; // "Graph" bold
     private readonly bool _showAsn;
+    private readonly bool _showPercentiles;
 
     // ── thresholds ─────────────────────────────────────────────────────────────
     private readonly RttThresholds _thresholds;
@@ -127,12 +136,13 @@ internal sealed class MtrAnsiRenderer
         _titleBytes       = EncodeTitleLine(titleHost);
         _keysBytes        = EncodeKeysLine();
         _subHeaderBytes   = EncodeSubHeaderLine(options.EnableAsn);
-        _headerBytes      = EncodeHeaderLine(options.EnableAsn);
+        _headerBytes      = EncodeHeaderLine(options.EnableAsn, options.ShowPercentiles);
         _hostHeaderBytes  = EncodeHostHeaderBytes();
-        _statsHeaderBytes = EncodeStatsHeaderBytes();
+        _statsHeaderBytes = EncodeStatsHeaderBytes(options.ShowPercentiles);
         _asnHeaderBytes   = EncodeAsnHeaderBytes();
         _sparklineHeaderBytes = EncodeSparklineHeaderBytes();
         _showAsn          = options.EnableAsn;
+        _showPercentiles  = options.ShowPercentiles;
         _startedAt        = DateTime.Now;
 
         // 16 KB frame buffer — ample for 30 hops × ~150 bytes + title/header overhead.
@@ -435,9 +445,8 @@ internal sealed class MtrAnsiRenderer
     // Moves the cursor so the stats section (Loss%..Jitter[+ASN]) ends at the right terminal edge.
     private void MoveToStatsColumn()
     {
-        int statsWidth = W_Stats + (_showAsn ? ColSepW + W_Asn : 0);
+        int statsWidth = TotalStatsWidth;
         int consoleWidth = Console.WindowWidth;
-        // Leave at least W_Host chars for the host column; if terminal is too narrow, don't jump.
         int col = consoleWidth - statsWidth;
         if (col <= W_Host) return;
         _writer.MoveCursorToColumn(col);
@@ -446,7 +455,7 @@ internal sealed class MtrAnsiRenderer
     // Writes sub-header ("Packets" / "Pings") right-aligned to match MoveToStatsColumn.
     private void WriteSubHeader()
     {
-        int statsWidth = W_Stats + (_showAsn ? ColSepW + W_Asn : 0);
+        int statsWidth = TotalStatsWidth;
         int consoleWidth = Console.WindowWidth;
         int statsStart = consoleWidth - statsWidth;   // leave 1-col margin at right edge
         if (statsStart <= W_Host) return;
@@ -476,7 +485,7 @@ internal sealed class MtrAnsiRenderer
     // Writes the column header row right-aligned to match MoveToStatsColumn.
     private void WriteHeader()
     {
-        int statsWidth = W_Stats + (_showAsn ? ColSepW + W_Asn : 0);
+        int statsWidth = TotalStatsWidth;
         int consoleWidth = Console.WindowWidth;
         int statsStart = consoleWidth - statsWidth;   // leave 1-col margin at right edge
         if (statsStart <= W_Host)
@@ -493,6 +502,16 @@ internal sealed class MtrAnsiRenderer
 
         _writer.WriteRaw(_statsHeaderBytes);
 
+        if (_showPercentiles)
+        {
+            _writer.Write(ColSep);
+            _writer.Bold();
+            _writer.WriteFixed("P95".AsSpan(), W_Rtt, rightAlign: true);
+            _writer.Write(ColSep);
+            _writer.WriteFixed("P99".AsSpan(), W_Rtt, rightAlign: true);
+            _writer.Reset();
+        }
+
         if (_showAsn)
         {
             _writer.Write(ColSep);
@@ -505,7 +524,7 @@ internal sealed class MtrAnsiRenderer
     // Returns the 1-based terminal column where the stats section starts, given the current console width.
     private int ComputeStatsStartColumn(int consoleWidth)
     {
-        int statsWidth = W_Stats + (_showAsn ? ColSepW + W_Asn : 0);
+        int statsWidth = TotalStatsWidth;
         int col = consoleWidth - statsWidth;
         return col > W_Host ? col : 0;  // 0 = terminal too narrow, use fallback
     }
@@ -550,6 +569,15 @@ internal sealed class MtrAnsiRenderer
         WriteRttColumn(hasRtt ? h.StdDev                                      : double.NaN, numBuf);
         _writer.Write(ColSep);
         WriteRttColumn(!double.IsNaN(h.Jitter) ? h.Jitter : double.NaN, numBuf);
+
+        // ── P95 / P99 percentile columns (opt-in) ─────────────────────────────
+        if (_showPercentiles)
+        {
+            _writer.Write(ColSep);
+            WriteRttColumn(hasRtt ? h.P95 : double.NaN, numBuf);
+            _writer.Write(ColSep);
+            WriteRttColumn(hasRtt ? h.P99 : double.NaN, numBuf);
+        }
 
         // ── Graph (sparkline) column ──────────────────────────────────────────
         _writer.Write(ColSep);
@@ -989,11 +1017,11 @@ internal sealed class MtrAnsiRenderer
         return buf[..pos];
     }
 
-    private static byte[] EncodeHeaderLine(bool showAsn = false)
+    private static byte[] EncodeHeaderLine(bool showAsn = false, bool showPercentiles = false)
     {
-        // "HOST                                     Loss%    Snt   Last    Avg   Best   Wrst  StDev  Jitter  [ASN]"
+        // "HOST                                     Loss%    Snt   Last    Avg   Best   Wrst  StDev  Jitter  [P95  P99]  [ASN]"
         // All bold.
-        byte[] buf = new byte[320];
+        byte[] buf = new byte[384];
         int pos = 0;
 
         "\x1B[1m"u8.CopyTo(buf.AsSpan(pos)); pos += 4;   // bold on
@@ -1012,6 +1040,11 @@ internal sealed class MtrAnsiRenderer
         pos += AppendRightAligned("  Wrst"u8,   W_Rtt  + 2, buf.AsSpan(pos));
         pos += AppendRightAligned("  StDev"u8,  W_Rtt  + 2, buf.AsSpan(pos));
         pos += AppendRightAligned("  Jitter"u8, W_Rtt   + 2, buf.AsSpan(pos));
+        if (showPercentiles)
+        {
+            pos += AppendRightAligned("  P95"u8, W_Rtt + 2, buf.AsSpan(pos));
+            pos += AppendRightAligned("  P99"u8, W_Rtt + 2, buf.AsSpan(pos));
+        }
         pos += AppendRightAligned("  Graph"u8,  W_Spark + 2, buf.AsSpan(pos));
 
         if (showAsn)
@@ -1044,9 +1077,9 @@ internal sealed class MtrAnsiRenderer
     }
 
     // Encodes Loss%..Sparkline column headers (right-aligned, bold, no reset).
-    private static byte[] EncodeStatsHeaderBytes()
+    private static byte[] EncodeStatsHeaderBytes(bool showPercentiles = false)
     {
-        byte[] buf = new byte[160];
+        byte[] buf = new byte[192];
         int pos = 0;
         pos += AppendRightAligned("Loss%"u8,    W_Loss, buf.AsSpan(pos));
         pos += AppendRightAligned("  Snt"u8,    W_Snt  + 2, buf.AsSpan(pos));
@@ -1056,6 +1089,11 @@ internal sealed class MtrAnsiRenderer
         pos += AppendRightAligned("  Wrst"u8,   W_Rtt  + 2, buf.AsSpan(pos));
         pos += AppendRightAligned("  StDev"u8,  W_Rtt  + 2, buf.AsSpan(pos));
         pos += AppendRightAligned("  Jitter"u8, W_Rtt  + 2, buf.AsSpan(pos));
+        if (showPercentiles)
+        {
+            pos += AppendRightAligned("  P95"u8, W_Rtt + 2, buf.AsSpan(pos));
+            pos += AppendRightAligned("  P99"u8, W_Rtt + 2, buf.AsSpan(pos));
+        }
         pos += AppendRightAligned("  Graph"u8,  W_Spark + 2, buf.AsSpan(pos));
         "\x1B[0m"u8.CopyTo(buf.AsSpan(pos)); pos += 4;          // reset
         return buf[..pos];

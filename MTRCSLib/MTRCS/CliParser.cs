@@ -42,6 +42,8 @@ internal static class CliParser
               --no-warmup     Include the first ping in charts and statistics.
                               By default a silent warmup cycle discards the inflated
                               cold-start RTT caused by ARP/routing cache misses.
+              --percentiles   Show P95 and P99 RTT columns in the live view and reports.
+              --dscp <value>  Set DSCP value (0-63) in probe packets for QoS verification.
           -h, --help          Show this help.
               --version       Show version.
 
@@ -61,6 +63,8 @@ internal static class CliParser
           {AppName} example.com --warn-rtt 50 --crit-rtt 150 --crit-loss 5
           {AppName} example.com --graph-green 10 --graph-cyan 30 --graph-yellow 60 --graph-red 100
           {AppName} example.com --no-warmup
+          {AppName} example.com --percentiles
+          {AppName} example.com --dscp 46
         """;
 
     /// <summary>
@@ -97,6 +101,8 @@ internal static class CliParser
         double graphRed    = 0.0;
         bool includeFirstPing = false;
         bool preferIPv6 = false;
+        bool showPercentiles = false;
+        int  dscpValue = 0;
 
         for (int i = 0; i < args.Length; i++)
         {
@@ -208,6 +214,14 @@ internal static class CliParser
                     includeFirstPing = true;
                     break;
 
+                case "--percentiles":
+                    showPercentiles = true;
+                    break;
+
+                case "--dscp":
+                    if (!TryNextInt(args, ref i, arg, out dscpValue, out string? errDscp)) return ParseResult.Fail(errDscp!);
+                    break;
+
                 case "-6":
                 case "--ipv6":
                     preferIPv6 = true;
@@ -234,7 +248,7 @@ internal static class CliParser
             outputPath, outputFormat,
             warnLoss, critLoss, warnRtt, critRtt,
             graphGreen, graphCyan, graphYellow, graphRed,
-            includeFirstPing, preferIPv6);
+            includeFirstPing, preferIPv6, showPercentiles, dscpValue);
 
         string? validationError = settings.Validate();
         return validationError is null

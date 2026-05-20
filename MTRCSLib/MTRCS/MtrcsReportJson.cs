@@ -27,6 +27,9 @@ internal sealed class HopEntryJson
     public double? Wrst   { get; init; }
     public double? StDev  { get; init; }
     public double? Jitter { get; init; }
+    // Populated only when --percentiles is enabled; omitted from output when null.
+    public double? P95    { get; init; }
+    public double? P99    { get; init; }
     // Populated only when --asn is enabled; omitted from output when null.
     public string? Asn    { get; init; }
     public string? AsnDesc { get; init; }

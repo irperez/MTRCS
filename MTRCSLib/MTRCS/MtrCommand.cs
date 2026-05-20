@@ -34,7 +34,9 @@ internal sealed class MtrCommand
         double graphYellow,
         double graphRed,
         bool includeFirstPing = false,
-        bool preferIPv6 = false)
+        bool preferIPv6 = false,
+        bool showPercentiles = false,
+        int dscpValue = 0)
     {
         internal string  Host            { get; } = host;
         internal int     MaxHops         { get; } = maxHops;
@@ -72,6 +74,18 @@ internal sealed class MtrCommand
         /// </summary>
         internal bool    PreferIPv6       { get; } = preferIPv6;
 
+        /// <summary>
+        /// When <see langword="true"/>, P95 and P99 percentile RTT columns are shown.
+        /// Corresponds to the <c>--percentiles</c> CLI flag.
+        /// </summary>
+        internal bool    ShowPercentiles  { get; } = showPercentiles;
+
+        /// <summary>
+        /// DSCP value (0–63) embedded in probe packets for QoS verification.
+        /// Corresponds to the <c>--dscp</c> CLI flag.
+        /// </summary>
+        internal int     DscpValue        { get; } = dscpValue;
+
         /// <summary>Builds the <see cref="RttThresholds"/> from CLI settings.</summary>
         internal RttThresholds BuildThresholds() => new()
         {
@@ -108,6 +122,8 @@ internal sealed class MtrCommand
                 return "--output requires --report mode.";
             if (OutputFormat is not ("text" or "csv" or "json"))
                 return "--format must be one of: text, csv, json.";
+            if (DscpValue is < 0 or > 63)
+                return "--dscp must be between 0 and 63.";
             if (WarnLoss < 0 || WarnLoss > 100)
                 return "--warn-loss must be between 0 and 100.";
             if (CritLoss < 0 || CritLoss > 100)
@@ -152,7 +168,9 @@ internal sealed class MtrCommand
                 mode,
                 settings.Port,
                 warmupPing: !settings.IncludeFirstPing,
-                preferIPv6: settings.PreferIPv6).ConfigureAwait(false);
+                preferIPv6: settings.PreferIPv6,
+                showPercentiles: settings.ShowPercentiles,
+                dscpValue: settings.DscpValue).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -170,15 +188,15 @@ internal sealed class MtrCommand
 
         using IDisposable? factoryDisposable = options.Mode switch
         {
-            ProbeMode.Tcp => new TcpPingerFactory(options.Port, options.Target.AddressFamily),
-            ProbeMode.Udp => new UdpPingerFactory(options.Port, options.Target.AddressFamily),
+            ProbeMode.Tcp => new TcpPingerFactory(options.Port, options.Target.AddressFamily, options.DscpValue),
+            ProbeMode.Udp => new UdpPingerFactory(options.Port, options.Target.AddressFamily, options.DscpValue),
             _ => null,
         };
         IPingerFactory pingerFactory = options.Mode switch
         {
             ProbeMode.Tcp => (TcpPingerFactory)factoryDisposable!,
             ProbeMode.Udp => (UdpPingerFactory)factoryDisposable!,
-            _ => new SystemPingerFactory(settings.PayloadBytes),
+            _ => new SystemPingerFactory(settings.PayloadBytes, options.DscpValue),
         };
         IDnsResolver dnsResolver = new SystemDnsResolver();
         IAsnResolver? asnResolver = settings.ShowAsn ? new CymruAsnResolver() : null;

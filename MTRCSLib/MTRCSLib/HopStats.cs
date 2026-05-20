@@ -11,8 +11,8 @@ namespace MTRCSLib;
 /// </summary>
 public struct HopStats
 {
-    /// <summary>Number of recent RTT samples kept for jitter/sparkline display.</summary>
-    public const int RingBufferSize = 64;
+    /// <summary>Number of recent RTT samples kept for jitter/sparkline display and percentile calculations.</summary>
+    public const int RingBufferSize = 128;
 
     // ── identity ──────────────────────────────────────────────────────────────
     private IPAddress? _address;
@@ -45,6 +45,23 @@ public struct HopStats
 
     /// <summary>Running standard deviation of RTT in ms (Welford).</summary>
     public double StdDev => NetworkUtils.StdDevFromVariance(_m2 / (_successCount > 1 ? _successCount - 1 : 1));
+
+    // ── Percentiles ───────────────────────────────────────────────────────────
+    // Sorted scratch copy rebuilt on demand; null until first percentile access.
+    private double[]? _sortedScratch;
+    private bool _sortedDirty = true; // true whenever new samples have been added
+
+    /// <summary>
+    /// 95th-percentile RTT in ms, computed over the ring-buffer samples.
+    /// Returns <see cref="double.NaN"/> until at least two replies have been received.
+    /// </summary>
+    public double P95 => ComputePercentile(0.95);
+
+    /// <summary>
+    /// 99th-percentile RTT in ms, computed over the ring-buffer samples.
+    /// Returns <see cref="double.NaN"/> until at least two replies have been received.
+    /// </summary>
+    public double P99 => ComputePercentile(0.99);
 
     // ── Jitter ────────────────────────────────────────────────────────────────
     private double _prevRtt;   // previous successful RTT (for jitter delta)
@@ -198,6 +215,7 @@ public struct HopStats
         _ring[_ringHead] = rttMs;
         _ringHead = (_ringHead + 1) % RingBufferSize;
         if (_ringCount < RingBufferSize) _ringCount++;
+        _sortedDirty = true;
     }
 
     /// <summary>
@@ -254,6 +272,31 @@ public struct HopStats
         _altAddresses?.Clear();
         _altHostNames?.Clear();
         _altDnsResolved?.Clear();
+        _sortedDirty = true;
+    }
+
+    /// <summary>
+    /// Computes the requested percentile (0.0–1.0) over current ring-buffer samples using
+    /// nearest-rank interpolation.  Returns <see cref="double.NaN"/> when fewer than 2 samples
+    /// are available.
+    /// </summary>
+    private double ComputePercentile(double fraction)
+    {
+        if (_ringCount < 2) return double.NaN;
+
+        // Rebuild sorted scratch only when new samples have arrived.
+        if (_sortedDirty || _sortedScratch is null || _sortedScratch.Length < _ringCount)
+        {
+            _sortedScratch = new double[_ringCount];
+            CopyRingSamples(_sortedScratch.AsSpan(0, _ringCount));
+            Array.Sort(_sortedScratch, 0, _ringCount);
+            _sortedDirty = false;
+        }
+
+        // Nearest-rank: index = ceil(fraction * n) - 1, clamped.
+        int idx = (int)Math.Ceiling(fraction * _ringCount) - 1;
+        idx = Math.Clamp(idx, 0, _ringCount - 1);
+        return _sortedScratch[idx];
     }
 
     /// <summary>

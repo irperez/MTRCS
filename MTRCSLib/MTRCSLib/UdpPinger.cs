@@ -18,16 +18,18 @@ internal sealed class UdpPinger : IPinger
 {
     private readonly IRawIcmpListener _listener;
     private readonly int _destPort;
+    private readonly int _dscpValue;
     private bool _disposed;
 
     // MTR default destination port for UDP probes.
     internal const int DefaultUdpPort = 33434;
 
-    public UdpPinger(IRawIcmpListener listener, int destPort = DefaultUdpPort)
+    public UdpPinger(IRawIcmpListener listener, int destPort = DefaultUdpPort, int dscpValue = 0)
     {
         ArgumentNullException.ThrowIfNull(listener);
         _listener = listener;
         _destPort = destPort;
+        _dscpValue = dscpValue;
     }
 
     /// <inheritdoc/>
@@ -48,6 +50,16 @@ internal sealed class UdpPinger : IPinger
             udp.SetSocketOption(SocketOptionLevel.IPv6, SocketOptionName.HopLimit, ttl);
         else
             udp.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.IpTimeToLive, ttl);
+
+        // DSCP encoded in upper 6 bits of TOS/Traffic Class byte.
+        if (_dscpValue > 0)
+        {
+            int tos = _dscpValue << 2;
+            if (target.AddressFamily == AddressFamily.InterNetworkV6)
+                udp.SetSocketOption(SocketOptionLevel.IPv6, SocketOptionName.TypeOfService, tos);
+            else
+                udp.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.TypeOfService, tos);
+        }
 
         // Bind to :0 to get an OS-assigned ephemeral port.
         IPEndPoint localEp = target.AddressFamily == AddressFamily.InterNetworkV6
