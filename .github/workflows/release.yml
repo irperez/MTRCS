@@ -198,6 +198,16 @@ jobs:
       - name: List artifacts
         run: ls -lh dist/
 
+      - name: Generate checksums
+        id: checksums
+        run: |
+          cd dist
+          find . -maxdepth 1 -type f \( -name '*.zip' -o -name '*.tar.gz' \) \
+            | sort | xargs -r sha256sum | sed 's|^\([a-f0-9]*\)  \./|\1  |' \
+            > checksums.sha256.txt
+          echo "--- Checksums ---"
+          cat checksums.sha256.txt
+
       - name: Generate release notes
         id: notes
         run: |
@@ -229,6 +239,21 @@ jobs:
           | Linux x64 | `mtrcs-${{ steps.version.outputs.tag }}-linux-x64.tar.gz` | Native AOT |
           | Linux ARM64 | `mtrcs-${{ steps.version.outputs.tag }}-linux-arm64.tar.gz` | Native AOT |
           | Raspberry Pi (ARMv7) | `mtrcs-${{ steps.version.outputs.tag }}-linux-arm.tar.gz` | Self-contained |
+
+          ### 🔐 Verify Your Download (SHA-256)
+
+          A `checksums.sha256.txt` file is attached to this release. Verify the integrity of your download:
+
+          ```bash
+          # Linux / macOS — download checksums.sha256.txt and your artifact into the
+          # same directory, then verify the specific file you downloaded:
+          grep "mtrcs-${{ steps.version.outputs.tag }}-linux-x64.tar.gz" checksums.sha256.txt | sha256sum --check
+
+          # Windows (PowerShell)
+          $expected = (Select-String "win-x64" checksums.sha256.txt).Line.Split(' ')[0]
+          $actual   = (Get-FileHash mtrcs-${{ steps.version.outputs.tag }}-win-x64.zip -Algorithm SHA256).Hash.ToLower()
+          if ($actual -eq $expected) { "✅ Checksum OK" } else { "❌ Checksum MISMATCH" }
+          ```
 
           ### ⚙️ Requirements
 
