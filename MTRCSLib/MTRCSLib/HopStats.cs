@@ -47,8 +47,8 @@ public struct HopStats
     public double StdDev => NetworkUtils.StdDevFromVariance(_m2 / (_successCount > 1 ? _successCount - 1 : 1));
 
     // ── Percentiles ───────────────────────────────────────────────────────────
-    // Sorted scratch copy rebuilt on demand; null until first percentile access.
-    private double[]? _sortedScratch;
+    // Sorted scratch copy rebuilt on demand; pre-allocated to RingBufferSize by Create().
+    private double[] _sortedScratch = [];
     private bool _sortedDirty = true; // true whenever new samples have been added
 
     /// <summary>
@@ -171,16 +171,17 @@ public struct HopStats
     /// Call this once per hop slot at session start to amortise the single allocation.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static HopStats Create() => new(new double[RingBufferSize]);
+    public static HopStats Create() => new(new double[RingBufferSize], new double[RingBufferSize]);
 
-    private HopStats(double[] ring)
-    {
-        _ring = ring;
-        _ringHead = 0;
-        _ringCount = 0;
-        Best = double.MaxValue;
-        Worst = double.MinValue;
-    }
+        private HopStats(double[] ring, double[] sortedScratch)
+        {
+            _ring = ring;
+            _sortedScratch = sortedScratch;
+            _ringHead = 0;
+            _ringCount = 0;
+            Best = double.MaxValue;
+            Worst = double.MinValue;
+        }
 
     // ── mutation ──────────────────────────────────────────────────────────────
 
@@ -285,9 +286,8 @@ public struct HopStats
         if (_ringCount < 2) return double.NaN;
 
         // Rebuild sorted scratch only when new samples have arrived.
-        if (_sortedDirty || _sortedScratch is null || _sortedScratch.Length < _ringCount)
+        if (_sortedDirty)
         {
-            _sortedScratch = new double[_ringCount];
             CopyRingSamples(_sortedScratch.AsSpan(0, _ringCount));
             Array.Sort(_sortedScratch, 0, _ringCount);
             _sortedDirty = false;

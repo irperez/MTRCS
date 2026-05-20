@@ -1,4 +1,5 @@
 using System.Buffers;
+using System.Net;
 using System.Text;
 using MTRCSLib;
 using MTRCSLib.Abstractions;
@@ -79,10 +80,20 @@ internal sealed class MtrAnsiRenderer
 
     // Pre-encoded UTF-8 bytes for the HOST column of each hop.
     // Rebuilt only when address, hostname, or available column width changes.
-    private readonly byte[]?[] _hopHostBytes;
-    private readonly string?[] _hopLastAddress;
-    private readonly string?[] _hopLastHostName;
-    private readonly int[]     _hopLastHostWidth;
+    private readonly byte[]?[]      _hopHostBytes;
+    private readonly IPAddress?[]   _hopLastAddressRef;   // reference equality guard — avoids IPAddress.ToString() every frame
+    private readonly string?[]      _hopLastAddress;      // cached ToString() result, only recomputed when reference changes
+    private readonly string?[]      _hopLastHostName;
+    private readonly int[]          _hopLastHostWidth;
+
+    // Per-hop ECMP (load-balanced alt address) pre-encoded line cache.
+    // Outer index = hop; inner index = alt-address slot (0-based, max MaxAltAddresses).
+    // Avoids IPAddress.ToString() and string interpolation allocations on every frame.
+    private const int MaxAltAddresses = 8; // must match HopStats.MaxAltAddresses
+    private readonly byte[]?[][]    _ecmpBytes;        // encoded line bytes
+    private readonly IPAddress?[][] _ecmpAddressRef;   // reference guard
+    private readonly string?[][]    _ecmpHostName;     // last hostname seen
+    private readonly int[][]        _ecmpHostWidth;    // last hostWidth seen
 
     // Pre-computed TTL prefix strings " 1." … "NN.".
     private readonly string[] _ttlPrefixes;
@@ -109,16 +120,31 @@ internal sealed class MtrAnsiRenderer
     private static ReadOnlySpan<char> SpinnerFrames => "⠉⠘⠰⢠⣀⡄⠆⠃";
     private int _spinnerIndex;
 
+    // Tracks which hop index is currently being rendered (used by GetOrBuildEcmpBytes).
+    private int _lastEcmpHopIndex;
+
     internal MtrAnsiRenderer(TracerouteOptions options, RttThresholds thresholds = default)
     {
         int maxHops = options.MaxHops;
 
-        _snapBuffer       = new HopStats[maxHops];
-        _ringBuf          = new double[HopStats.RingBufferSize];
-        _hopHostBytes     = new byte[maxHops][];
-        _hopLastAddress   = new string?[maxHops];
-        _hopLastHostName  = new string?[maxHops];
-        _hopLastHostWidth = new int[maxHops];
+        _snapBuffer          = new HopStats[maxHops];
+        _ringBuf             = new double[HopStats.RingBufferSize];
+        _hopHostBytes        = new byte[maxHops][];
+        _hopLastAddressRef   = new IPAddress?[maxHops];
+        _hopLastAddress      = new string?[maxHops];
+        _hopLastHostName     = new string?[maxHops];
+        _hopLastHostWidth    = new int[maxHops];
+        _ecmpBytes       = new byte[maxHops][][];
+        _ecmpAddressRef  = new IPAddress?[maxHops][];
+        _ecmpHostName    = new string?[maxHops][];
+        _ecmpHostWidth   = new int[maxHops][];
+        for (int i = 0; i < maxHops; i++)
+        {
+            _ecmpBytes[i]      = new byte[MaxAltAddresses][];
+            _ecmpAddressRef[i] = new IPAddress?[MaxAltAddresses];
+            _ecmpHostName[i]   = new string?[MaxAltAddresses];
+            _ecmpHostWidth[i]  = new int[MaxAltAddresses];
+        }
         _ttlPrefixes      = new string[maxHops];
         _thresholds       = thresholds;
 
@@ -219,6 +245,7 @@ internal sealed class MtrAnsiRenderer
         for (int i = 0; i < count; i++)
         {
             ref readonly HopStats h = ref _snapBuffer[i];
+            _lastEcmpHopIndex = i;
             WriteHopLine(i, in h, numBuf, out int hostWidth);
             WriteEcmpLines(in h, hostWidth);
         }
@@ -600,52 +627,127 @@ internal sealed class MtrAnsiRenderer
         int altCount = h.AltAddressCount;
         if (altCount == 0) return;
 
-        const string indent = "    "; // 4 spaces = TTL prefix width (" N." + space)
-
         for (int a = 0; a < altCount; a++)
         {
-            string altIp = h.GetAltAddress(a).ToString();
-            string? altHn = h.GetAltHostName(a);
-
-            _writer.Grey();
-            _writer.Write(indent);
-            _writer.Reset();
-
-            int available   = hostWidth - indent.Length;
-            int ipSuffixLen = altIp.Length + 3; // " (" + ip + ")"
-
-            if (altHn is { Length: > 0 } && !string.Equals(altHn, altIp, StringComparison.Ordinal))
-            {
-                if (available >= altHn.Length + ipSuffixLen)
-                {
-                    // Phase 3: full "hn (ip)"
-                    string label = $"{altHn} ({altIp})";
-                    _writer.WriteFixed(label.AsSpan(), available);
-                }
-                else if (available >= 2 + ipSuffixLen)
-                {
-                    // Phase 2: truncated hostname + "…" + " (ip)"
-                    int maxHnLen = available - 1 - ipSuffixLen;
-                    string label = $"{altHn[..maxHnLen]}\u2026 ({altIp})";
-                    _writer.WriteFixed(label.AsSpan(), available);
-                }
-                else
-                {
-                    // Phase 1: hostname only, truncated if needed
-                    string hn = altHn.Length > available
-                        ? $"{altHn[..Math.Max(0, available - 1)]}\u2026"
-                        : altHn;
-                    _writer.WriteFixed(hn.AsSpan(), available);
-                }
-            }
-            else
-            {
-                _writer.WriteFixed(altIp.AsSpan(), available);
-            }
-
+            _writer.WriteRaw(GetOrBuildEcmpBytes(h, a, hostWidth));
             _writer.EraseEol();
             _writer.NewLine();
         }
+    }
+
+    private byte[] GetOrBuildEcmpBytes(in HopStats h, int altIndex, int hostWidth)
+    {
+        // Resolve current hop index from the snapshot buffer position tracked by caller.
+        // We can't pass hopIndex into WriteEcmpLines easily, so we use the altIndex arrays
+        // indexed by a linear scan — instead, store per-hop caches with the hop index.
+        // WriteEcmpLines is always called immediately after WriteHopLine for the same hop,
+        // so we track the last written hop index via _lastEcmpHopIndex.
+        int hopIndex = _lastEcmpHopIndex;
+
+        IPAddress  currentRef = h.GetAltAddress(altIndex);
+        string?    currentHn  = h.GetAltHostName(altIndex);
+
+        if (_ecmpBytes[hopIndex][altIndex] is { } cached &&
+            ReferenceEquals(currentRef, _ecmpAddressRef[hopIndex][altIndex]) &&
+            currentHn    == _ecmpHostName[hopIndex][altIndex] &&
+            hostWidth     == _ecmpHostWidth[hopIndex][altIndex])
+        {
+            return cached;
+        }
+
+        // Build once; cache for future frames.
+        string altIp = currentRef.ToString();
+        byte[] encoded = BuildAndEncodeEcmpLabel(altIp, currentHn, hostWidth);
+
+        _ecmpBytes[hopIndex][altIndex]      = encoded;
+        _ecmpAddressRef[hopIndex][altIndex] = currentRef;
+        _ecmpHostName[hopIndex][altIndex]   = currentHn;
+        _ecmpHostWidth[hopIndex][altIndex]  = hostWidth;
+
+        return encoded;
+    }
+
+    private static byte[] BuildAndEncodeEcmpLabel(string altIp, string? altHn, int hostWidth)
+    {
+        const string indent = "    "; // 4 spaces = TTL prefix width (" N." + space)
+        int available   = hostWidth - indent.Length;
+        int ipSuffixLen = altIp.Length + 3; // " (" + ip + ")"
+
+        using var sb = new ValueStringBuilder(stackalloc char[80]);
+
+        if (altHn is { Length: > 0 } && !string.Equals(altHn, altIp, StringComparison.Ordinal))
+        {
+            if (available >= altHn.Length + ipSuffixLen)
+            {
+                // Phase 3: full "hn (ip)"
+                sb.Append(altHn);
+                return EncodeEcmpWithGreyIp(indent, sb.AsSpan(), altIp, hostWidth);
+            }
+            if (available >= 2 + ipSuffixLen)
+            {
+                // Phase 2: truncated hostname + "…" + " (ip)"
+                int maxHnLen = available - 1 - ipSuffixLen;
+                sb.Append(altHn.AsSpan(0, maxHnLen));
+                sb.Append('\u2026');
+                return EncodeEcmpWithGreyIp(indent, sb.AsSpan(), altIp, hostWidth);
+            }
+            // Phase 1: hostname only, truncated
+            if (altHn.Length > available)
+            {
+                sb.Append(altHn.AsSpan(0, Math.Max(0, available - 1)));
+                sb.Append('\u2026');
+            }
+            else
+            {
+                sb.Append(altHn);
+            }
+            return EncodeEcmpIndented(indent, sb.AsSpan(), hostWidth, grey: false);
+        }
+
+        // No hostname — show IP only.
+        return EncodeEcmpIndented(indent, altIp.AsSpan(), hostWidth, grey: false);
+    }
+
+    /// <summary>Encodes an ECMP line: grey indent, then label, then grey " (ip)", padded to hostWidth.</summary>
+    private static byte[] EncodeEcmpWithGreyIp(string indent, ReadOnlySpan<char> label, string ip, int hostWidth)
+    {
+        // Format: ESC[90m + indent + ESC[0m + label + ESC[90m + " (" + ip + ")" + ESC[0m + padding
+        int pad = Math.Max(0, hostWidth - indent.Length - label.Length - ip.Length - 3);
+        int maxLen = 5 + indent.Length + 4 + Encoding.UTF8.GetMaxByteCount(label.Length)
+                   + 5 + ip.Length + 3 + 4 + pad;
+        byte[] buf = new byte[maxLen];
+        int pos = 0;
+
+        "\x1B[90m"u8.CopyTo(buf.AsSpan(pos)); pos += 5;
+        pos += Encoding.UTF8.GetBytes(indent, buf.AsSpan(pos));
+        "\x1B[0m"u8.CopyTo(buf.AsSpan(pos)); pos += 4;
+        pos += Encoding.UTF8.GetBytes(label, buf.AsSpan(pos));
+        "\x1B[90m"u8.CopyTo(buf.AsSpan(pos)); pos += 5;
+        buf[pos++] = (byte)' '; buf[pos++] = (byte)'(';
+        pos += Encoding.UTF8.GetBytes(ip, buf.AsSpan(pos));
+        buf[pos++] = (byte)')';
+        "\x1B[0m"u8.CopyTo(buf.AsSpan(pos)); pos += 4;
+        if (pad > 0) { buf.AsSpan(pos, pad).Fill((byte)' '); pos += pad; }
+
+        return buf[..pos];
+    }
+
+    /// <summary>Encodes an ECMP line: grey indent, then plain text label, padded to hostWidth.</summary>
+    private static byte[] EncodeEcmpIndented(string indent, ReadOnlySpan<char> text, int hostWidth, bool grey)
+    {
+        int visibleLen = indent.Length + text.Length;
+        int pad = Math.Max(0, hostWidth - visibleLen);
+        int maxLen = 5 + indent.Length + 4 + Encoding.UTF8.GetMaxByteCount(text.Length) + pad;
+        byte[] buf = new byte[maxLen];
+        int pos = 0;
+
+        "\x1B[90m"u8.CopyTo(buf.AsSpan(pos)); pos += 5;
+        pos += Encoding.UTF8.GetBytes(indent, buf.AsSpan(pos));
+        "\x1B[0m"u8.CopyTo(buf.AsSpan(pos)); pos += 4;
+        pos += Encoding.UTF8.GetBytes(text, buf.AsSpan(pos));
+        if (pad > 0) { buf.AsSpan(pos, pad).Fill((byte)' '); pos += pad; }
+
+        return buf[..pos];
     }
 
     // Also used for individual RTT columns; caller passes avg RTT only for the coloring check.
@@ -794,23 +896,27 @@ internal sealed class MtrAnsiRenderer
 
     private byte[] GetOrBuildHostBytes(int hopIndex, in HopStats h, int hostWidth)
     {
-        string? currentAddress  = h.Address?.ToString();
-        string? currentHostName = h.HostName;
+        IPAddress? currentAddressRef = h.Address;
+        string?    currentHostName   = h.HostName;
 
+        // Fast path: reference equality on IPAddress avoids ToString() allocation every frame.
         if (_hopHostBytes[hopIndex] is { } cached &&
-            currentAddress  == _hopLastAddress[hopIndex] &&
+            ReferenceEquals(currentAddressRef, _hopLastAddressRef[hopIndex]) &&
             currentHostName == _hopLastHostName[hopIndex] &&
             hostWidth        == _hopLastHostWidth[hopIndex])
         {
             return cached;
         }
 
+        // Address reference changed — convert to string once and cache it.
+        string? currentAddress = currentAddressRef?.ToString();
         byte[] encoded = BuildAndEncodeHostLabel(hopIndex, currentAddress, currentHostName, hostWidth);
 
-        _hopHostBytes[hopIndex]    = encoded;
-        _hopLastAddress[hopIndex]  = currentAddress;
-        _hopLastHostName[hopIndex] = currentHostName;
-        _hopLastHostWidth[hopIndex] = hostWidth;
+        _hopHostBytes[hopIndex]       = encoded;
+        _hopLastAddressRef[hopIndex]  = currentAddressRef;
+        _hopLastAddress[hopIndex]     = currentAddress;
+        _hopLastHostName[hopIndex]    = currentHostName;
+        _hopLastHostWidth[hopIndex]   = hostWidth;
 
         return encoded;
     }
