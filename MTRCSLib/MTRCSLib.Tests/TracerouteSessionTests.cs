@@ -68,7 +68,7 @@ internal static class SessionFactory
     private static readonly IPAddress Target = IPAddress.Parse("8.8.8.8");
 
     public static TracerouteOptions Options(int maxHops = 4, int intervalMs = 50, int timeoutMs = 100) =>
-        TracerouteOptions.Create(Target, "8.8.8.8", maxHops, intervalMs, timeoutMs);
+        TracerouteOptions.Create(Target, "8.8.8.8", maxHops, intervalMs, timeoutMs, warmupPing: false);
 
     public static TracerouteSession Create(
         IEnumerable<FakePinger> pingers,

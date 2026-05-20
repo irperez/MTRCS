@@ -413,3 +413,80 @@ public class NetworkUtils_StdDevFromVarianceTests
             NetworkUtils.StdDevFromVariance(variance).ShouldBeGreaterThanOrEqualTo(0.0);
     }
 }
+
+// ── IsIPv6 ────────────────────────────────────────────────────────────────────
+
+public class NetworkUtils_IsIPv6Tests
+{
+    [Fact]
+    public void WhenGivenIPv6Loopback_ReturnsTrue()
+    {
+        NetworkUtils.IsIPv6(IPAddress.IPv6Loopback).ShouldBeTrue();
+    }
+
+    [Fact]
+    public void WhenGivenIPv6Any_ReturnsTrue()
+    {
+        NetworkUtils.IsIPv6(IPAddress.IPv6Any).ShouldBeTrue();
+    }
+
+    [Fact]
+    public void WhenGivenGoogleIPv6Address_ReturnsTrue()
+    {
+        NetworkUtils.IsIPv6(IPAddress.Parse("2001:4860:4860::8888")).ShouldBeTrue();
+    }
+
+    [Fact]
+    public void WhenGivenMappedIPv4InIPv6_ReturnsTrue()
+    {
+        // ::ffff:192.168.1.1 is AddressFamily.InterNetworkV6
+        NetworkUtils.IsIPv6(IPAddress.Parse("::ffff:192.168.1.1")).ShouldBeTrue();
+    }
+
+    [Fact]
+    public void WhenGivenIPv4Loopback_ReturnsFalse()
+    {
+        NetworkUtils.IsIPv6(IPAddress.Loopback).ShouldBeFalse();
+    }
+
+    [Fact]
+    public void WhenGivenIPv4Broadcast_ReturnsFalse()
+    {
+        NetworkUtils.IsIPv6(IPAddress.Broadcast).ShouldBeFalse();
+    }
+
+    [Fact]
+    public void WhenGivenIPv4Any_ReturnsFalse()
+    {
+        NetworkUtils.IsIPv6(IPAddress.Any).ShouldBeFalse();
+    }
+
+    [Theory]
+    [InlineData("8.8.8.8")]
+    [InlineData("192.168.1.1")]
+    [InlineData("10.0.0.1")]
+    public void WhenGivenIPv4Address_ReturnsFalse(string ip)
+    {
+        NetworkUtils.IsIPv6(IPAddress.Parse(ip)).ShouldBeFalse();
+    }
+
+    [Theory]
+    [InlineData("::1")]
+    [InlineData("fe80::1")]
+    [InlineData("2606:4700:4700::1111")]
+    public void WhenGivenVariousIPv6Addresses_ReturnsTrue(string ip)
+    {
+        NetworkUtils.IsIPv6(IPAddress.Parse(ip)).ShouldBeTrue();
+    }
+
+    // Symmetry: IsIPv4 and IsIPv6 are mutually exclusive for all standard addresses.
+    [Theory]
+    [InlineData("8.8.8.8")]
+    [InlineData("2001:4860:4860::8888")]
+    public void IsIPv4AndIsIPv6_AreMutuallyExclusive(string ip)
+    {
+        var address = IPAddress.Parse(ip);
+        (NetworkUtils.IsIPv4(address) && NetworkUtils.IsIPv6(address)).ShouldBeFalse();
+        (NetworkUtils.IsIPv4(address) || NetworkUtils.IsIPv6(address)).ShouldBeTrue();
+    }
+}

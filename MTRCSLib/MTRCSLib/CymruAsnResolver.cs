@@ -24,6 +24,18 @@ public sealed class CymruAsnResolver : IAsnResolver
     private const string Origin6Suffix  = ".origin6.asn.cymru.com";
     private const string AsnSuffix      = ".asn.cymru.com";
 
+    // Allows tests to inject a fake DNS query function without network I/O.
+    private readonly Func<string, CancellationToken, ValueTask<string?>> _queryTxt;
+
+    /// <summary>Creates a resolver that uses the real UDP DNS implementation.</summary>
+    public CymruAsnResolver() : this(null) { }
+
+    /// <summary>Creates a resolver with an injected DNS query function (for testing).</summary>
+    internal CymruAsnResolver(Func<string, CancellationToken, ValueTask<string?>>? queryTxt)
+    {
+        _queryTxt = queryTxt ?? QueryFirstTxtAsync;
+    }
+
     /// <inheritdoc/>
     public async ValueTask<AsnInfo?> ResolveAsync(IPAddress address, CancellationToken cancellationToken = default)
     {
@@ -36,7 +48,7 @@ public sealed class CymruAsnResolver : IAsnResolver
             string reversed = isV6 ? ReverseIpv6(address) : ReverseIp(address);
             string originHost = reversed + (isV6 ? Origin6Suffix : OriginSuffix);
 
-            string? originTxt = await QueryFirstTxtAsync(originHost, cancellationToken).ConfigureAwait(false);
+            string? originTxt = await _queryTxt(originHost, cancellationToken).ConfigureAwait(false);
             if (originTxt is null)
                 return null;
 
@@ -54,7 +66,7 @@ public sealed class CymruAsnResolver : IAsnResolver
 
             // Look up the AS name.
             string asnHost = asnNumber + AsnSuffix;
-            string? asnTxt = await QueryFirstTxtAsync(asnHost, cancellationToken).ConfigureAwait(false);
+            string? asnTxt = await _queryTxt(asnHost, cancellationToken).ConfigureAwait(false);
 
             // Expected format: "ASN | CC | registry | date | description"
             string description = asnTxt is not null
