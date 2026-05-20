@@ -1078,7 +1078,7 @@ internal sealed class MtrAnsiRenderer
         byte[] buf = new byte[32];
         int pos = 0;
         "\x1B[1m"u8.CopyTo(buf.AsSpan(pos)); pos += 4;
-        pos += AppendRightAligned("ASN"u8, W_Asn, buf.AsSpan(pos));
+        "ASN"u8.CopyTo(buf.AsSpan(pos)); pos += 3;
         "\x1B[0m"u8.CopyTo(buf.AsSpan(pos)); pos += 4;
         return buf[..pos];
     }

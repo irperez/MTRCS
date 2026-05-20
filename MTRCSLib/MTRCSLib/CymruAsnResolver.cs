@@ -35,9 +35,16 @@ public sealed class CymruAsnResolver : IAsnResolver
                 return null;
 
             // Expected format: "ASN | prefix | CC | registry | date"
-            string asnNumber = ParseField(originTxt, 0);
-            if (string.IsNullOrWhiteSpace(asnNumber))
+            // Multi-origin prefixes may return space-separated ASNs (e.g. "15169 64512"); use the first.
+            string asnField = ParseField(originTxt, 0);
+            if (string.IsNullOrWhiteSpace(asnField))
                 return null;
+
+            int spaceIdx = asnField.IndexOf(' ');
+            string asnNumber = spaceIdx > 0 ? asnField[..spaceIdx] : asnField;
+
+            // CC field (e.g. "US") is always present; use it as a reliable fallback description.
+            string cc = ParseField(originTxt, 2);
 
             // Look up the AS name.
             string asnHost = asnNumber + AsnSuffix;
@@ -52,6 +59,10 @@ public sealed class CymruAsnResolver : IAsnResolver
             int comma = description.LastIndexOf(',');
             if (comma > 0 && description.Length - comma <= 4)
                 description = description[..comma].TrimEnd();
+
+            // Fall back to the CC country code when the name lookup yields nothing.
+            if (string.IsNullOrWhiteSpace(description))
+                description = cc;
 
             return new AsnInfo($"AS{asnNumber}", description);
         }
