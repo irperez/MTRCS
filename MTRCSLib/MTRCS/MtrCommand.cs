@@ -201,6 +201,27 @@ internal sealed class MtrCommand
         IDnsResolver dnsResolver = new SystemDnsResolver();
         IAsnResolver? asnResolver = settings.ShowAsn ? new CymruAsnResolver() : null;
 
+        // Preflight: on Linux, ICMP probing with a custom payload requires elevated privileges
+        // (root or CAP_NET_RAW).  Detect this before starting the session so the user sees a
+        // clear error message instead of every hop silently showing 100% loss.
+        if (options.Mode == ProbeMode.Icmp && options.PayloadBytes > 0 && OperatingSystem.IsLinux())
+        {
+            using IPinger preflight = pingerFactory.Create();
+            try
+            {
+                await preflight.SendProbeAsync(
+                    options.Target, ttl: 64, sequence: 0,
+                    timeoutMs: 100, payloadBytes: options.PayloadBytes)
+                    .ConfigureAwait(false);
+            }
+            catch (PlatformNotSupportedException ex)
+            {
+                Console.Error.Write("Error: ");
+                Console.Error.WriteLine(ex.Message);
+                return 1;
+            }
+        }
+
         await using TracerouteSession session = new(options, pingerFactory, dnsResolver, asnResolver);
         await session.StartAsync(cts.Token).ConfigureAwait(false);
 

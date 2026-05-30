@@ -104,6 +104,10 @@ internal sealed class SystemPinger : IPinger
                     ProbeResult.FromTimeout(ttl, PingStatus.Error, sequence),
             };
         }
+        catch (PlatformNotSupportedException)
+        {
+            throw;
+        }
         catch (OperationCanceledException)
         {
             throw;
