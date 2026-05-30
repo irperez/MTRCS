@@ -201,6 +201,33 @@ internal sealed class MtrCommand
         IDnsResolver dnsResolver = new SystemDnsResolver();
         IAsnResolver? asnResolver = settings.ShowAsn ? new CymruAsnResolver() : null;
 
+        // Preflight: on Linux, ICMP probing with a custom (non-empty) payload requires elevated
+        // privileges (root or CAP_NET_RAW).  System.Net.NetworkInformation.Ping throws
+        // PlatformNotSupportedException when a custom payload is supplied without the necessary
+        // permissions.  Detect this before starting the session so the user sees a clear error
+        // message instead of every hop silently showing 100% loss.
+        // Note: PayloadBytes == 0 uses an empty payload (SOCK_DGRAM path) which does not throw
+        // PlatformNotSupportedException, so no preflight is needed in that case.
+        if (options.Mode == ProbeMode.Icmp && options.PayloadBytes > 0 && OperatingSystem.IsLinux())
+        {
+            using IPinger preflight = pingerFactory.Create();
+            try
+            {
+                // The probe result is intentionally discarded; we are only checking for a
+                // PlatformNotSupportedException thrown at socket-creation time.
+                await preflight.SendProbeAsync(
+                    options.Target, ttl: 64, sequence: 0,
+                    timeoutMs: 100, payloadBytes: options.PayloadBytes)
+                    .ConfigureAwait(false);
+            }
+            catch (PlatformNotSupportedException ex)
+            {
+                Console.Error.Write("Error: ");
+                Console.Error.WriteLine(ex.Message);
+                return 1;
+            }
+        }
+
         await using TracerouteSession session = new(options, pingerFactory, dnsResolver, asnResolver);
         await session.StartAsync(cts.Token).ConfigureAwait(false);
 
