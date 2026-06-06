@@ -1,16 +1,22 @@
+using System.Reflection;
 using MTRCSLib;
 
 namespace MTRCS;
 
 /// <summary>
-/// Zero-allocation, reflection-free command-line parser.
+/// Zero-allocation command-line parser.
 /// Parses <c>string[] args</c> into <see cref="MtrCommand.Settings"/> with full validation.
-/// AOT-safe: no attributes are read at runtime, no dynamic code.
+/// AOT-safe: version is read from <see cref="System.Reflection.AssemblyInformationalVersionAttribute"/>,
+/// which is preserved by the Native AOT compiler.
 /// </summary>
 internal static class CliParser
 {
     private const string AppName = "mtrcs";
-    private const string AppVersion = "1.0.0";
+    private static readonly string AppVersion =
+        typeof(CliParser).Assembly
+            .GetCustomAttribute<AssemblyInformationalVersionAttribute>()
+            ?.InformationalVersion?.Split('+')[0]
+        ?? "unknown";
 
     private static readonly string HelpText = $"""
         {AppName} {AppVersion} — MTR-style traceroute
